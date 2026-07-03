@@ -7,6 +7,7 @@ import (
 	"io"
 	"reflect"
 	"testing"
+	"testing/iotest"
 
 	"github.com/ciram-co/storekit"
 )
@@ -57,6 +58,34 @@ func TestBlobPutGetRoundTrip(t *testing.T) {
 				t.Errorf("Get() = %q, want %q", got, tt.content)
 			}
 		})
+	}
+}
+
+// TestBlobPutReaderError documents Put's current pass-through of a reader
+// failure: when r returns an error mid-drain, Put propagates that error verbatim
+// (no storekit-typed wrapping — a BlobReadError is deliberately deferred to the
+// streaming backends) and stores nothing, so the key stays absent.
+func TestBlobPutReaderError(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	s := newBlobStore()
+	const key = "blobs/readerror"
+
+	boom := errors.New("boom")
+	err := s.Put(ctx, key, iotest.ErrReader(boom))
+	if !errors.Is(err, boom) {
+		t.Fatalf("Put(failing reader) error = %v, want it to wrap %v", err, boom)
+	}
+
+	// Nothing must have been stored: the key stays absent.
+	_, gerr := s.Get(ctx, key)
+	var nf *storekit.BlobNotFoundError
+	if !errors.As(gerr, &nf) {
+		t.Fatalf("Get after failed Put = %v, want *storekit.BlobNotFoundError (nothing stored)", gerr)
+	}
+	if nf.Key != key {
+		t.Errorf("BlobNotFoundError.Key = %q, want %q", nf.Key, key)
 	}
 }
 
