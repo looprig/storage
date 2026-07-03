@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/ciram-co/storekit"
+	"github.com/looprig/storekit"
 )
 
 // This file holds only the memstore-SPECIFIC lease test that the shared

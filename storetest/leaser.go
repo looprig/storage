@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/ciram-co/storekit"
+	"github.com/looprig/storekit"
 )
 
 // TestLeaser runs the Leaser conformance suite. newBackend must return a fresh,

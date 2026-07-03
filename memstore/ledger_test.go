@@ -7,7 +7,7 @@ import (
 	"io"
 	"testing"
 
-	"github.com/ciram-co/storekit"
+	"github.com/looprig/storekit"
 )
 
 // This file holds only the memstore-SPECIFIC ledger tests that the shared
