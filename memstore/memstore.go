@@ -15,6 +15,19 @@ import (
 	"github.com/ciram-co/storekit"
 )
 
+// New assembles the in-memory reference backend: a *storekit.Composite wiring
+// one fresh backing store per primitive (ledger, leaser, KV, blobs). All four
+// providers are non-nil, so the underlying NewComposite can never report an
+// incomplete composite — a non-nil error here is impossible and is treated as an
+// unrecoverable programmer error (panic) rather than propagated.
+func New() *storekit.Composite {
+	c, err := storekit.NewComposite(newLedgerStore(), newLeaserStore(), newKVStore(), newBlobStore())
+	if err != nil {
+		panic(err) // unreachable: every primitive above is non-nil
+	}
+	return c
+}
+
 // ledgerStore is the in-memory Ledger backing type: many named ledgers, each an
 // ordered slice of immutable records, guarded by a single RWMutex. Records are
 // 1-based and contiguous by construction (Append only ever extends the tip).
