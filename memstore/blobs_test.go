@@ -8,7 +8,7 @@ import (
 	"testing"
 	"testing/iotest"
 
-	"github.com/looprig/storekit"
+	"github.com/looprig/storage"
 )
 
 // This file holds only the memstore-SPECIFIC blob tests that the shared

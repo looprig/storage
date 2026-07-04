@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/looprig/storekit"
+	"github.com/looprig/storage"
 )
 
 // TestLeaser runs the Leaser conformance suite. newBackend must return a fresh,

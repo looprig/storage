@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/looprig/storekit"
+	"github.com/looprig/storage"
 )
 
 // TestLedger runs the Ledger conformance suite. newBackend must return a fresh,

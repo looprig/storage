@@ -3,9 +3,9 @@ package memstore_test
 import (
 	"testing"
 
-	"github.com/looprig/storekit"
-	"github.com/looprig/storekit/memstore"
-	"github.com/looprig/storekit/storetest"
+	"github.com/looprig/storage"
+	"github.com/looprig/storage/memstore"
+	"github.com/looprig/storage/storetest"
 )
 
 // This file runs the shared storetest backend-conformance suites against the

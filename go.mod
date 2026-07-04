@@ -1,3 +1,3 @@
-module github.com/looprig/storekit
+module github.com/looprig/storage
 
 go 1.25.0

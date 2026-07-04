@@ -6,7 +6,7 @@ import (
 	"io"
 	"testing"
 
-	"github.com/looprig/storekit"
+	"github.com/looprig/storage"
 )
 
 // payloadFloor is the minimum payload/value/blob size every storekit backend

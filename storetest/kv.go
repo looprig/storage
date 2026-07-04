@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/looprig/storekit"
+	"github.com/looprig/storage"
 )
 
 // TestKV runs the KV conformance suite. newBackend must return a fresh, empty

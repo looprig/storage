@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/looprig/storekit"
+	"github.com/looprig/storage"
 )
 
 // TestBlobs runs the Blobs conformance suite. newBackend must return a fresh,
