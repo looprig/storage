@@ -1,4 +1,4 @@
-package storekit
+package storage
 
 import (
 	"errors"
@@ -15,7 +15,7 @@ func TestErrorsMessageAndAs(t *testing.T) {
 
 	tests := []struct {
 		name string
-		// err is the concrete storekit error under test.
+		// err is the concrete storage error under test.
 		err error
 		// wantSubstrs are substrings Error() must contain — the subject
 		// (Name/Key) plus any relevant number.
@@ -99,7 +99,7 @@ func TestErrorsMessageAndAs(t *testing.T) {
 		},
 	}
 
-	const prefix = "storekit: "
+	const prefix = "storage: "
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -119,7 +119,7 @@ func TestErrorsMessageAndAs(t *testing.T) {
 			}
 
 			// The canonical usage: a backend wraps the cause with
-			// fmt.Errorf("...: %w", &storekit.XxxError{...}); callers must
+			// fmt.Errorf("...: %w", &storage.XxxError{...}); callers must
 			// recover the concrete type across that wrap with errors.As.
 			wrapped := fmt.Errorf("backend op failed: %w", tt.err)
 			if !tt.as(wrapped) {

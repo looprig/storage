@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// TestNewComposite asserts New() returns a fully-wired *storekit.Composite: all
+// TestNewComposite asserts New() returns a fully-wired *storage.Composite: all
 // four embedded providers are non-nil and each is independently callable through
 // its named field. It is a wiring smoke test — the per-primitive semantics are
 // pinned by the ledger/lease/kv/blobs tests.

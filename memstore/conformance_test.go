@@ -18,20 +18,20 @@ import (
 
 func TestLedgerConformance(t *testing.T) {
 	t.Parallel()
-	storetest.TestLedger(t, func(t *testing.T) storekit.Ledger { return memstore.New().Ledger })
+	storetest.TestLedger(t, func(t *testing.T) storage.Ledger { return memstore.New().Ledger })
 }
 
 func TestLeaserConformance(t *testing.T) {
 	t.Parallel()
-	storetest.TestLeaser(t, func(t *testing.T) storekit.Leaser { return memstore.New().Leaser })
+	storetest.TestLeaser(t, func(t *testing.T) storage.Leaser { return memstore.New().Leaser })
 }
 
 func TestKVConformance(t *testing.T) {
 	t.Parallel()
-	storetest.TestKV(t, func(t *testing.T) storekit.KV { return memstore.New().KV })
+	storetest.TestKV(t, func(t *testing.T) storage.KV { return memstore.New().KV })
 }
 
 func TestBlobsConformance(t *testing.T) {
 	t.Parallel()
-	storetest.TestBlobs(t, func(t *testing.T) storekit.Blobs { return memstore.New().Blobs })
+	storetest.TestBlobs(t, func(t *testing.T) storage.Blobs { return memstore.New().Blobs })
 }

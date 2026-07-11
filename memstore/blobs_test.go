@@ -42,7 +42,7 @@ func getBytes(t *testing.T, s *blobStore, key string) []byte {
 
 // TestBlobPutReaderError documents Put's current pass-through of a reader
 // failure: when r returns an error mid-drain, Put propagates that error verbatim
-// (no storekit-typed wrapping — a BlobReadError is deliberately deferred to the
+// (no storage-typed wrapping — a BlobReadError is deliberately deferred to the
 // streaming backends) and stores nothing, so the key stays absent.
 func TestBlobPutReaderError(t *testing.T) {
 	t.Parallel()
@@ -59,9 +59,9 @@ func TestBlobPutReaderError(t *testing.T) {
 
 	// Nothing must have been stored: the key stays absent.
 	_, gerr := s.Get(ctx, key)
-	var nf *storekit.BlobNotFoundError
+	var nf *storage.BlobNotFoundError
 	if !errors.As(gerr, &nf) {
-		t.Fatalf("Get after failed Put = %v, want *storekit.BlobNotFoundError (nothing stored)", gerr)
+		t.Fatalf("Get after failed Put = %v, want *storage.BlobNotFoundError (nothing stored)", gerr)
 	}
 	if nf.Key != key {
 		t.Errorf("BlobNotFoundError.Key = %q, want %q", nf.Key, key)

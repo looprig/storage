@@ -30,7 +30,7 @@ func TestLeaserAcquireContention(t *testing.T) {
 	const racers = 16
 
 	type result struct {
-		lease storekit.Lease
+		lease storage.Lease
 		err   error
 	}
 	results := make(chan result, racers)
@@ -53,9 +53,9 @@ func TestLeaserAcquireContention(t *testing.T) {
 			winnerEpoch = r.lease.Epoch()
 			continue
 		}
-		var held *storekit.LeaseHeldError
+		var held *storage.LeaseHeldError
 		if !errors.As(r.err, &held) {
-			t.Errorf("loser Acquire error = %v, want *storekit.LeaseHeldError", r.err)
+			t.Errorf("loser Acquire error = %v, want *storage.LeaseHeldError", r.err)
 		}
 	}
 	if winners != 1 {

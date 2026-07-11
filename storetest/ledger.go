@@ -13,7 +13,7 @@ import (
 
 // TestLedger runs the Ledger conformance suite. newBackend must return a fresh,
 // empty Ledger; register any cleanup via t.Cleanup inside newBackend.
-func TestLedger(t *testing.T, newBackend func(t *testing.T) storekit.Ledger) {
+func TestLedger(t *testing.T, newBackend func(t *testing.T) storage.Ledger) {
 	ctx := context.Background()
 
 	t.Run("append read round-trip with 1-based seq", func(t *testing.T) {
@@ -97,7 +97,7 @@ func TestLedger(t *testing.T, newBackend func(t *testing.T) storekit.Ledger) {
 				}
 
 				err := l.Append(ctx, name, tc.expected, []byte("new"))
-				var ce *storekit.ConflictError
+				var ce *storage.ConflictError
 				if !errors.As(err, &ce) {
 					t.Fatalf("Append(expected=%d) = %v, want *ConflictError", tc.expected, err)
 				}
@@ -131,7 +131,7 @@ func TestLedger(t *testing.T, newBackend func(t *testing.T) storekit.Ledger) {
 		}
 		// A stale writer still holding the old expected==1 must be fenced off.
 		err := l.Append(ctx, name, 1, []byte("stale"))
-		var ce *storekit.ConflictError
+		var ce *storage.ConflictError
 		if !errors.As(err, &ce) {
 			t.Fatalf("stale Append(expected=1) = %v, want *ConflictError", err)
 		}
@@ -324,19 +324,19 @@ func TestLedger(t *testing.T, newBackend func(t *testing.T) storekit.Ledger) {
 	t.Run("invalid name", func(t *testing.T) {
 		methods := []struct {
 			method string
-			call   func(l storekit.Ledger, name string) error
+			call   func(l storage.Ledger, name string) error
 		}{
-			{"Append", func(l storekit.Ledger, name string) error { return l.Append(ctx, name, 0, []byte("x")) }},
-			{"Read", func(l storekit.Ledger, name string) error { _, err := l.Read(ctx, name, 1); return err }},
-			{"Tip", func(l storekit.Ledger, name string) error { _, err := l.Tip(ctx, name); return err }},
-			{"Delete", func(l storekit.Ledger, name string) error { return l.Delete(ctx, name) }},
+			{"Append", func(l storage.Ledger, name string) error { return l.Append(ctx, name, 0, []byte("x")) }},
+			{"Read", func(l storage.Ledger, name string) error { _, err := l.Read(ctx, name, 1); return err }},
+			{"Tip", func(l storage.Ledger, name string) error { _, err := l.Tip(ctx, name); return err }},
+			{"Delete", func(l storage.Ledger, name string) error { return l.Delete(ctx, name) }},
 		}
 		for _, m := range methods {
 			for _, bad := range invalidNames {
 				t.Run(m.method+"/"+bad.label, func(t *testing.T) {
 					l := newBackend(t)
 					err := m.call(l, bad.value)
-					var ine *storekit.InvalidNameError
+					var ine *storage.InvalidNameError
 					if !errors.As(err, &ine) {
 						t.Fatalf("%s(%q) = %v, want *InvalidNameError", m.method, bad.value, err)
 					}
@@ -370,12 +370,12 @@ func TestLedger(t *testing.T, newBackend func(t *testing.T) storekit.Ledger) {
 						errCh <- err
 						return
 					}
-					err = storekit.AppendDefinite(ctx, l, name, tip, payload)
+					err = storage.AppendDefinite(ctx, l, name, tip, payload)
 					if err == nil {
 						errCh <- nil
 						return
 					}
-					var ce *storekit.ConflictError
+					var ce *storage.ConflictError
 					if errors.As(err, &ce) {
 						continue // lost the race; retry at the fresh tip
 					}

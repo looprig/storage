@@ -12,14 +12,14 @@ import (
 
 // TestKV runs the KV conformance suite. newBackend must return a fresh, empty
 // KV; register any cleanup via t.Cleanup inside newBackend.
-func TestKV(t *testing.T, newBackend func(t *testing.T) storekit.KV) {
+func TestKV(t *testing.T, newBackend func(t *testing.T) storage.KV) {
 	ctx := context.Background()
 
 	t.Run("get absent returns KeyNotFoundError", func(t *testing.T) {
 		kv := newBackend(t)
 		const key = "sessions/missing"
 		_, _, err := kv.Get(ctx, key)
-		var nf *storekit.KeyNotFoundError
+		var nf *storage.KeyNotFoundError
 		if !errors.As(err, &nf) {
 			t.Fatalf("Get(absent) = %v, want *KeyNotFoundError", err)
 		}
@@ -108,7 +108,7 @@ func TestKV(t *testing.T, newBackend func(t *testing.T) storekit.KV) {
 				}
 
 				_, err := kv.Put(ctx, key, tc.expectedRev, []byte("nope"))
-				var ce *storekit.ConflictError
+				var ce *storage.ConflictError
 				if !errors.As(err, &ce) {
 					t.Fatalf("Put(expectedRev=%d) = %v, want *ConflictError", tc.expectedRev, err)
 				}
@@ -120,7 +120,7 @@ func TestKV(t *testing.T, newBackend func(t *testing.T) storekit.KV) {
 				}
 
 				if tc.preRevs == 0 {
-					if _, _, gerr := kv.Get(ctx, key); !errors.As(gerr, new(*storekit.KeyNotFoundError)) {
+					if _, _, gerr := kv.Get(ctx, key); !errors.As(gerr, new(*storage.KeyNotFoundError)) {
 						t.Errorf("Get after rejected Put = %v, want key still absent", gerr)
 					}
 					return
@@ -221,7 +221,7 @@ func TestKV(t *testing.T, newBackend func(t *testing.T) storekit.KV) {
 					}
 				}
 
-				if _, _, err := kv.Get(ctx, key); !errors.As(err, new(*storekit.KeyNotFoundError)) {
+				if _, _, err := kv.Get(ctx, key); !errors.As(err, new(*storage.KeyNotFoundError)) {
 					t.Errorf("Get after delete = %v, want *KeyNotFoundError", err)
 				}
 				// A deleted key is truly absent: a fresh create-only Put succeeds.
@@ -235,18 +235,18 @@ func TestKV(t *testing.T, newBackend func(t *testing.T) storekit.KV) {
 	t.Run("invalid key", func(t *testing.T) {
 		methods := []struct {
 			method string
-			call   func(kv storekit.KV, key string) error
+			call   func(kv storage.KV, key string) error
 		}{
-			{"Get", func(kv storekit.KV, key string) error { _, _, err := kv.Get(ctx, key); return err }},
-			{"Put", func(kv storekit.KV, key string) error { _, err := kv.Put(ctx, key, 0, []byte("x")); return err }},
-			{"Delete", func(kv storekit.KV, key string) error { return kv.Delete(ctx, key) }},
+			{"Get", func(kv storage.KV, key string) error { _, _, err := kv.Get(ctx, key); return err }},
+			{"Put", func(kv storage.KV, key string) error { _, err := kv.Put(ctx, key, 0, []byte("x")); return err }},
+			{"Delete", func(kv storage.KV, key string) error { return kv.Delete(ctx, key) }},
 		}
 		for _, m := range methods {
 			for _, bad := range invalidNames {
 				t.Run(m.method+"/"+bad.label, func(t *testing.T) {
 					kv := newBackend(t)
 					err := m.call(kv, bad.value)
-					var ine *storekit.InvalidNameError
+					var ine *storage.InvalidNameError
 					if !errors.As(err, &ine) {
 						t.Fatalf("%s(%q) = %v, want *InvalidNameError", m.method, bad.value, err)
 					}

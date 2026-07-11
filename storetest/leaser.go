@@ -13,7 +13,7 @@ import (
 //
 // Cross-process reclaim (a dead holder's lease being reclaimed by the backend's
 // native mechanism) is "where testable" and left to each backend's own tests.
-func TestLeaser(t *testing.T, newBackend func(t *testing.T) storekit.Leaser) {
+func TestLeaser(t *testing.T, newBackend func(t *testing.T) storage.Leaser) {
 	ctx := context.Background()
 
 	t.Run("acquire on a free name grants a live lease", func(t *testing.T) {
@@ -38,7 +38,7 @@ func TestLeaser(t *testing.T, newBackend func(t *testing.T) storekit.Leaser) {
 			t.Fatalf("first Acquire: %v", err)
 		}
 		_, err = le.Acquire(ctx, name)
-		var held *storekit.LeaseHeldError
+		var held *storage.LeaseHeldError
 		if !errors.As(err, &held) {
 			t.Fatalf("second Acquire = %v, want *LeaseHeldError", err)
 		}
@@ -134,7 +134,7 @@ func TestLeaser(t *testing.T, newBackend func(t *testing.T) storekit.Leaser) {
 			t.Run(bad.label, func(t *testing.T) {
 				le := newBackend(t)
 				_, err := le.Acquire(ctx, bad.value)
-				var ine *storekit.InvalidNameError
+				var ine *storage.InvalidNameError
 				if !errors.As(err, &ine) {
 					t.Fatalf("Acquire(%q) = %v, want *InvalidNameError", bad.value, err)
 				}

@@ -1,4 +1,4 @@
-package storekit
+package storage
 
 import (
 	"context"
@@ -158,8 +158,8 @@ func TestNewComposite(t *testing.T) {
 			// The message must be prefixed like the rest of the taxonomy and
 			// name every missing primitive.
 			msg := ice.Error()
-			if !strings.HasPrefix(msg, "storekit: ") {
-				t.Errorf("Error() = %q, want prefix %q", msg, "storekit: ")
+			if !strings.HasPrefix(msg, "storage: ") {
+				t.Errorf("Error() = %q, want prefix %q", msg, "storage: ")
 			}
 			for _, want := range tt.wantMissing {
 				if !strings.Contains(msg, want) {

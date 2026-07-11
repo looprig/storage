@@ -1,4 +1,4 @@
-package storekit
+package storage
 
 import (
 	"errors"

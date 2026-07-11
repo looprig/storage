@@ -11,7 +11,7 @@ import (
 
 // TestBlobs runs the Blobs conformance suite. newBackend must return a fresh,
 // empty Blobs; register any cleanup via t.Cleanup inside newBackend.
-func TestBlobs(t *testing.T, newBackend func(t *testing.T) storekit.Blobs) {
+func TestBlobs(t *testing.T, newBackend func(t *testing.T) storage.Blobs) {
 	ctx := context.Background()
 
 	t.Run("put get round-trip", func(t *testing.T) {
@@ -79,7 +79,7 @@ func TestBlobs(t *testing.T, newBackend func(t *testing.T) storekit.Blobs) {
 					t.Fatalf("first Put: %v", err)
 				}
 				err := b.Put(ctx, key, bytes.NewReader(tc.second))
-				var bc *storekit.BlobConflictError
+				var bc *storage.BlobConflictError
 				if !errors.As(err, &bc) {
 					t.Fatalf("re-Put(different) = %v, want *BlobConflictError", err)
 				}
@@ -102,7 +102,7 @@ func TestBlobs(t *testing.T, newBackend func(t *testing.T) storekit.Blobs) {
 		b := newBackend(t)
 		const key = "blobs/missing"
 		_, err := b.Get(ctx, key)
-		var nf *storekit.BlobNotFoundError
+		var nf *storage.BlobNotFoundError
 		if !errors.As(err, &nf) {
 			t.Fatalf("Get(absent) = %v, want *BlobNotFoundError", err)
 		}
@@ -187,7 +187,7 @@ func TestBlobs(t *testing.T, newBackend func(t *testing.T) storekit.Blobs) {
 					}
 				}
 
-				if _, err := b.Get(ctx, key); !errors.As(err, new(*storekit.BlobNotFoundError)) {
+				if _, err := b.Get(ctx, key); !errors.As(err, new(*storage.BlobNotFoundError)) {
 					t.Errorf("Get after delete = %v, want *BlobNotFoundError", err)
 				}
 				// A deleted key is free: a fresh Put of new content succeeds with no
@@ -202,18 +202,18 @@ func TestBlobs(t *testing.T, newBackend func(t *testing.T) storekit.Blobs) {
 	t.Run("invalid key", func(t *testing.T) {
 		methods := []struct {
 			method string
-			call   func(b storekit.Blobs, key string) error
+			call   func(b storage.Blobs, key string) error
 		}{
-			{"Put", func(b storekit.Blobs, key string) error { return b.Put(ctx, key, bytes.NewReader([]byte("x"))) }},
-			{"Get", func(b storekit.Blobs, key string) error { _, err := b.Get(ctx, key); return err }},
-			{"Delete", func(b storekit.Blobs, key string) error { return b.Delete(ctx, key) }},
+			{"Put", func(b storage.Blobs, key string) error { return b.Put(ctx, key, bytes.NewReader([]byte("x"))) }},
+			{"Get", func(b storage.Blobs, key string) error { _, err := b.Get(ctx, key); return err }},
+			{"Delete", func(b storage.Blobs, key string) error { return b.Delete(ctx, key) }},
 		}
 		for _, m := range methods {
 			for _, bad := range invalidNames {
 				t.Run(m.method+"/"+bad.label, func(t *testing.T) {
 					b := newBackend(t)
 					err := m.call(b, bad.value)
-					var ine *storekit.InvalidNameError
+					var ine *storage.InvalidNameError
 					if !errors.As(err, &ine) {
 						t.Fatalf("%s(%q) = %v, want *InvalidNameError", m.method, bad.value, err)
 					}

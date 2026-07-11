@@ -22,9 +22,9 @@ import (
 // drain reads a cursor to exhaustion, returning every record it yields. It fails
 // the test on any error other than io.EOF, so callers can assert on the drained
 // slice directly.
-func drain(t *testing.T, c storekit.Cursor) []storekit.Record {
+func drain(t *testing.T, c storage.Cursor) []storage.Record {
 	t.Helper()
-	var out []storekit.Record
+	var out []storage.Record
 	for {
 		rec, err := c.Next(context.Background())
 		if errors.Is(err, io.EOF) {
@@ -250,9 +250,9 @@ func TestLedgerAppendContention(t *testing.T) {
 			winnerPayload = r.payload
 			continue
 		}
-		var ce *storekit.ConflictError
+		var ce *storage.ConflictError
 		if !errors.As(r.err, &ce) {
-			t.Errorf("loser Append error = %v, want *storekit.ConflictError", r.err)
+			t.Errorf("loser Append error = %v, want *storage.ConflictError", r.err)
 			continue
 		}
 		if ce.Expected != 0 {

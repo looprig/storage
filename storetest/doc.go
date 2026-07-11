@@ -1,8 +1,8 @@
-// Package storetest provides backend-conformance suites for the four storekit
+// Package storetest provides backend-conformance suites for the four storage
 // primitives — Ledger, Leaser, KV, and Blobs. A backend's own _test.go calls
 // TestLedger/TestLeaser/TestKV/TestBlobs with a factory that returns a fresh,
 // empty primitive; the suite drives every contract behavior shared by all
-// backends and classifies failures with errors.As against the storekit-canonical
+// backends and classifies failures with errors.As against the storage-canonical
 // typed errors — never by string.
 //
 // The suites live in regular (non-_test.go) files and take an extra newBackend

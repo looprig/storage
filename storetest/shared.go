@@ -9,12 +9,12 @@ import (
 	"github.com/looprig/storage"
 )
 
-// payloadFloor is the minimum payload/value/blob size every storekit backend
+// payloadFloor is the minimum payload/value/blob size every storage backend
 // must accept (1 MiB); the suites exercise it as the "payload floor". Larger
 // payloads are the engine's responsibility to offload to Blobs.
 const payloadFloor = 1 << 20
 
-// invalidName pairs a name that violates the storekit grammar with a human label
+// invalidName pairs a name that violates the storage grammar with a human label
 // used to name its subtest.
 type invalidName struct {
 	label string
@@ -75,7 +75,7 @@ func isClosed(ch <-chan struct{}) bool {
 // readAll opens a cursor at from, drains it to exhaustion, and closes it,
 // returning every record. It runs on the CALLING goroutine and fails the test on
 // any error, so it must never be invoked from a spawned goroutine.
-func readAll(t *testing.T, l storekit.Ledger, name string, from uint64) []storekit.Record {
+func readAll(t *testing.T, l storage.Ledger, name string, from uint64) []storage.Record {
 	t.Helper()
 	ctx := context.Background()
 	cur, err := l.Read(ctx, name, from)
@@ -87,7 +87,7 @@ func readAll(t *testing.T, l storekit.Ledger, name string, from uint64) []storek
 			t.Errorf("cursor Close: %v, want nil", cerr)
 		}
 	}()
-	var out []storekit.Record
+	var out []storage.Record
 	for {
 		rec, nerr := cur.Next(ctx)
 		if errors.Is(nerr, io.EOF) {
