@@ -39,7 +39,7 @@ var invalidNames = []invalidName{
 func patternedBytes(n int) []byte {
 	b := make([]byte, n)
 	for i := range b {
-		b[i] = byte(i * 31)
+		b[i] = byte(i * 31) // #nosec G115 -- deliberate truncating fill pattern for test payloads, not security-sensitive
 	}
 	return b
 }

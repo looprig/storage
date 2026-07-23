@@ -112,7 +112,7 @@ func TestLedger(t *testing.T, newBackend func(t *testing.T) storage.Ledger) {
 				if terr != nil {
 					t.Fatalf("Tip: %v", terr)
 				}
-				if tip != uint64(tc.pre) {
+				if tip != uint64(tc.pre) { // #nosec G115 -- tc.pre is a fixed, small, non-negative test-table literal
 					t.Errorf("Tip after rejected CAS = %d, want %d (state unchanged)", tip, tc.pre)
 				}
 			})
