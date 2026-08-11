@@ -1,0 +1,163 @@
+{
+  "schemaVersion": 1,
+  "repository": "storage",
+  "proofSources": [
+    {
+      "id": "example-storage-ledger-cursor-source",
+      "type": "go-example",
+      "path": "examples/ledger/example_test.go#Example_boundedCursor"
+    },
+    {
+      "id": "example-storage-leases-source",
+      "type": "go-example",
+      "path": "examples/leases/example_test.go#Example_epochFencing"
+    },
+    {
+      "id": "example-storage-kv-source",
+      "type": "go-example",
+      "path": "examples/kv/example_test.go#Example_revisionCAS"
+    },
+    {
+      "id": "example-storage-blobs-source",
+      "type": "go-example",
+      "path": "examples/blobs/example_test.go#Example_immutableContent"
+    },
+    {
+      "id": "example-storage-composite-memstore-source",
+      "type": "go-example",
+      "path": "examples/composite/example_test.go#ExampleNewComposite"
+    },
+    {
+      "id": "example-storage-storetest-source",
+      "type": "go-test",
+      "path": "examples/storetest/example_test.go#TestBackendConformance"
+    },
+    {
+      "id": "example-storage-artifacts-contract-test",
+      "type": "go-test",
+      "path": "tests/example_test.go#TestDocsExamplesArtifacts"
+    }
+  ],
+  "examples": [
+    {
+      "id": "example-storage-ledger-cursor-behavior",
+      "ecosystem": "go",
+      "owner": "storage",
+      "sourcePath": "examples/ledger/example_test.go",
+      "availability": "source-workspace",
+      "versions": {
+        "github.com/looprig/storage": "source-workspace"
+      },
+      "offlineCommand": "GOWORK=off go test -race ./...",
+      "assertion": "Go example output proves contiguous event sequences, tip reporting, and that a ledger cursor is bounded at Read time.",
+      "workflowPath": ".github/workflows/docs-examples.yml",
+      "jobId": "docs-examples",
+      "cleanup": "No cleanup required; the example uses a process-local in-memory ledger.",
+      "liveGate": null,
+      "proofIds": [
+        "example-storage-ledger-cursor-source",
+        "example-storage-artifacts-contract-test"
+      ]
+    },
+    {
+      "id": "example-storage-lease-epoch-fencing",
+      "ecosystem": "go",
+      "owner": "storage",
+      "sourcePath": "examples/leases/example_test.go",
+      "availability": "source-workspace",
+      "versions": {
+        "github.com/looprig/storage": "source-workspace"
+      },
+      "offlineCommand": "GOWORK=off go test -race ./...",
+      "assertion": "Go example output proves exclusive acquisition, typed held errors, loss notification on release, and increasing epochs.",
+      "workflowPath": ".github/workflows/docs-examples.yml",
+      "jobId": "docs-examples",
+      "cleanup": "The example releases both process-local leases; no persistent resources are created.",
+      "liveGate": null,
+      "proofIds": [
+        "example-storage-leases-source",
+        "example-storage-artifacts-contract-test"
+      ]
+    },
+    {
+      "id": "example-storage-kv-revision-cas",
+      "ecosystem": "go",
+      "owner": "storage",
+      "sourcePath": "examples/kv/example_test.go",
+      "availability": "source-workspace",
+      "versions": {
+        "github.com/looprig/storage": "source-workspace"
+      },
+      "offlineCommand": "GOWORK=off go test -race ./...",
+      "assertion": "Go example output proves create and update revisions, current value lookup, and lexicographically sorted prefix listing.",
+      "workflowPath": ".github/workflows/docs-examples.yml",
+      "jobId": "docs-examples",
+      "cleanup": "No cleanup required; the example uses a process-local in-memory KV store.",
+      "liveGate": null,
+      "proofIds": [
+        "example-storage-kv-source",
+        "example-storage-artifacts-contract-test"
+      ]
+    },
+    {
+      "id": "example-storage-blobs-immutable-content",
+      "ecosystem": "go",
+      "owner": "storage",
+      "sourcePath": "examples/blobs/example_test.go",
+      "availability": "source-workspace",
+      "versions": {
+        "github.com/looprig/storage": "source-workspace"
+      },
+      "offlineCommand": "GOWORK=off go test -race ./...",
+      "assertion": "Go example output proves byte-identical Put is idempotent, different content conflicts, and the original blob remains unchanged.",
+      "workflowPath": ".github/workflows/docs-examples.yml",
+      "jobId": "docs-examples",
+      "cleanup": "No cleanup required; the example uses process-local in-memory blob storage.",
+      "liveGate": null,
+      "proofIds": [
+        "example-storage-blobs-source",
+        "example-storage-artifacts-contract-test"
+      ]
+    },
+    {
+      "id": "example-storage-composite-memstore-wiring",
+      "ecosystem": "go",
+      "owner": "storage",
+      "sourcePath": "examples/composite/example_test.go",
+      "availability": "source-workspace",
+      "versions": {
+        "github.com/looprig/storage": "source-workspace"
+      },
+      "offlineCommand": "GOWORK=off go test -race ./...",
+      "assertion": "Go example output proves memstore supplies every primitive, Composite exposes them together, and incomplete wiring is rejected.",
+      "workflowPath": ".github/workflows/docs-examples.yml",
+      "jobId": "docs-examples",
+      "cleanup": "No cleanup required; memstore owns only process-local memory.",
+      "liveGate": null,
+      "proofIds": [
+        "example-storage-composite-memstore-source",
+        "example-storage-artifacts-contract-test"
+      ]
+    },
+    {
+      "id": "example-storage-storetest-backend-contract",
+      "ecosystem": "go",
+      "owner": "storage",
+      "sourcePath": "examples/storetest/example_test.go",
+      "availability": "source-workspace",
+      "versions": {
+        "github.com/looprig/storage": "source-workspace"
+      },
+      "offlineCommand": "GOWORK=off go test -race ./...",
+      "assertion": "Go tests prove a backend author can run the reusable Ledger, Leaser, KV, and Blobs conformance suites with fresh factories.",
+      "workflowPath": ".github/workflows/docs-examples.yml",
+      "jobId": "docs-examples",
+      "cleanup": "Each conformance case receives a fresh process-local memstore, so no cleanup is required.",
+      "liveGate": null,
+      "proofIds": [
+        "example-storage-storetest-source",
+        "example-storage-artifacts-contract-test"
+      ]
+    }
+  ]
+}
