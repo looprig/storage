@@ -18,9 +18,10 @@ type manifest struct {
 }
 
 type proofSource struct {
-	ID   string `json:"id"`
-	Type string `json:"type"`
-	Path string `json:"path"`
+	ID     string `json:"id"`
+	Type   string `json:"type"`
+	Path   string `json:"path"`
+	Symbol string `json:"symbol,omitempty"`
 }
 
 type example struct {
@@ -79,15 +80,20 @@ func TestDocsExamplesArtifacts(t *testing.T) {
 
 	proofs := make(map[string]struct{}, len(got.ProofSources))
 	for _, proof := range got.ProofSources {
-		if !strings.HasPrefix(proof.ID, "example-storage-") || proof.Type == "" || proof.Path == "" {
+		if !strings.HasPrefix(proof.ID, "example-storage-") || proof.Path == "" || proof.Symbol == "" {
 			t.Errorf("invalid proof source: %#v", proof)
+		}
+		if proof.Type != "executable-fixture" && proof.Type != "test" {
+			t.Errorf("proof source %q type = %q", proof.ID, proof.Type)
+		}
+		if strings.Contains(proof.Path, "#") {
+			t.Errorf("proof source %q path contains a symbol fragment: %q", proof.ID, proof.Path)
 		}
 		if _, duplicate := proofs[proof.ID]; duplicate {
 			t.Errorf("duplicate proof source %q", proof.ID)
 		}
 		proofs[proof.ID] = struct{}{}
-		proofPath := strings.Split(proof.Path, "#")[0]
-		if _, err := os.Stat(filepath.Join(root, proofPath)); err != nil {
+		if _, err := os.Stat(filepath.Join(root, proof.Path)); err != nil {
 			t.Errorf("proof source %q: %v", proof.ID, err)
 		}
 	}

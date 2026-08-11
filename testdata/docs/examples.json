@@ -4,38 +4,45 @@
   "proofSources": [
     {
       "id": "example-storage-ledger-cursor-source",
-      "type": "go-example",
-      "path": "examples/ledger/example_test.go#Example_boundedCursor"
+      "type": "executable-fixture",
+      "path": "examples/ledger/example_test.go",
+      "symbol": "Example_boundedCursor"
     },
     {
       "id": "example-storage-leases-source",
-      "type": "go-example",
-      "path": "examples/leases/example_test.go#Example_epochFencing"
+      "type": "executable-fixture",
+      "path": "examples/leases/example_test.go",
+      "symbol": "Example_epochFencing"
     },
     {
       "id": "example-storage-kv-source",
-      "type": "go-example",
-      "path": "examples/kv/example_test.go#Example_revisionCAS"
+      "type": "executable-fixture",
+      "path": "examples/kv/example_test.go",
+      "symbol": "Example_revisionCAS"
     },
     {
       "id": "example-storage-blobs-source",
-      "type": "go-example",
-      "path": "examples/blobs/example_test.go#Example_immutableContent"
+      "type": "executable-fixture",
+      "path": "examples/blobs/example_test.go",
+      "symbol": "Example_immutableContent"
     },
     {
       "id": "example-storage-composite-memstore-source",
-      "type": "go-example",
-      "path": "examples/composite/example_test.go#ExampleNewComposite"
+      "type": "executable-fixture",
+      "path": "examples/composite/example_test.go",
+      "symbol": "ExampleNewComposite"
     },
     {
       "id": "example-storage-storetest-source",
-      "type": "go-test",
-      "path": "examples/storetest/example_test.go#TestBackendConformance"
+      "type": "test",
+      "path": "examples/storetest/example_test.go",
+      "symbol": "TestBackendConformance"
     },
     {
       "id": "example-storage-artifacts-contract-test",
-      "type": "go-test",
-      "path": "tests/example_test.go#TestDocsExamplesArtifacts"
+      "type": "test",
+      "path": "tests/example_test.go",
+      "symbol": "TestDocsExamplesArtifacts"
     }
   ],
   "examples": [
