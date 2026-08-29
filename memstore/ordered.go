@@ -2,19 +2,18 @@ package memstore
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
-	"io"
+	"strconv"
 	"strings"
 
 	"github.com/looprig/storage"
 )
 
 const (
-	orderedCursorVersion uint8 = 1
+	// orderedCursorVersionField is the encoded payload's version token. It is
+	// carried inside the payload as well as in the token header so a decoder
+	// never infers a version from the header alone.
+	orderedCursorVersionField = "1"
 
 	rankedCursorTokenKind = "ranked"
 	dueCursorTokenKind    = "due"
@@ -22,10 +21,13 @@ const (
 	rankedCursorHeader = "v1:r:"
 	dueCursorHeader    = "v1:d:"
 
-	orderedCursorMACBytes = sha256.Size
+	// orderedCursorFieldCount is the exact field count of both encoded cursor
+	// payloads: version, kind, and five query/position fields.
+	orderedCursorFieldCount = 7
+
 	// maxOrderedCursorBytes is deliberately well above the largest valid
 	// cursor generated from the contract's bounded names and stable key, while
-	// keeping untrusted pre-authentication parsing allocation-bounded.
+	// keeping untrusted parsing allocation-bounded.
 	maxOrderedCursorBytes = 8 << 10
 	maxOrderedUint64      = ^uint64(0)
 )
@@ -101,41 +103,11 @@ type orderedStore struct {
 	ordered   map[orderedScope][]orderedIdentity
 	ranked    map[rankedScope][]orderedIdentity
 	due       map[string][]orderedIdentity
-
-	// cursorKey makes externally supplied continuation tokens tamper-evident.
-	// It is fixed for the store lifetime, so cursors are valid only from the
-	// provider instance that issued them, which is appropriate for memstore's
-	// non-durable process-local state.
-	cursorKey [sha256.Size]byte
-	cursorErr error
 }
 
-// String prevents ordinary diagnostic formatting from traversing the store's
-// private fields, which include the cursor-signing key and caller-supplied
-// record values. It intentionally reports no mutable state.
-func (*orderedStore) String() string {
-	return "memstore.orderedStore{redacted}"
-}
-
-// GoString provides the same redaction for fmt's %#v form, which otherwise
-// reflects unexported fields of the concrete value held by OrderedIndex.
-func (*orderedStore) GoString() string {
-	return "(*memstore.orderedStore)(redacted)"
-}
-
-// newOrderedStore returns an empty orderedStore. If the operating system cannot
-// supply cryptographic randomness, rank and due listing fails closed rather than
-// issuing forgeable continuation tokens; mutations and acceptance-order reads
-// remain usable because they do not mint opaque cursors.
+// newOrderedStore returns an empty orderedStore.
 func newOrderedStore() *orderedStore {
-	return newOrderedStoreWithCursorReader(rand.Reader)
-}
-
-// newOrderedStoreWithCursorReader exists only to make the otherwise
-// environment-dependent cursor-key failure path testable. Production always
-// supplies crypto/rand.Reader through newOrderedStore.
-func newOrderedStoreWithCursorReader(reader io.Reader) *orderedStore {
-	s := &orderedStore{
+	return &orderedStore{
 		mu:        newContextMutex(),
 		records:   make(map[orderedIdentity]storage.OrderedRecord),
 		highWater: make(map[orderedScope]uint64),
@@ -143,14 +115,6 @@ func newOrderedStoreWithCursorReader(reader io.Reader) *orderedStore {
 		ranked:    make(map[rankedScope][]orderedIdentity),
 		due:       make(map[string][]orderedIdentity),
 	}
-	_, s.cursorErr = io.ReadFull(reader, s.cursorKey[:])
-	if s.cursorErr != nil {
-		// Do not retain a partial key if a future caller accidentally ignores
-		// cursorErr. cursorReady still prevents signing, and clearing here makes
-		// the fail-closed invariant robust to partial entropy reads.
-		s.cursorKey = [sha256.Size]byte{}
-	}
-	return s
 }
 
 // Compile-time proof that *orderedStore honors the OrderedIndex contract.
@@ -420,11 +384,7 @@ func (s *orderedStore) ListRanked(ctx context.Context, namespace string, ranking
 		page.Records = append(page.Records, cloneOrderedRecord(s.records[key]))
 	}
 	if end < len(entries) {
-		cursor, err := s.encodeRankedCursor(rankedPositionFor(page.Records[len(page.Records)-1]))
-		if err != nil {
-			return storage.RankedPage{}, err
-		}
-		page.NextCursor = cursor
+		page.NextCursor = encodeRankedCursor(rankedPositionFor(page.Records[len(page.Records)-1]))
 	}
 	return page, nil
 }
@@ -477,11 +437,7 @@ func (s *orderedStore) ListDue(ctx context.Context, namespace string, dueAtOrBef
 		page.Records = append(page.Records, cloneOrderedRecord(s.records[key]))
 	}
 	if end < eligibleEnd {
-		cursor, err := s.encodeDueCursor(duePositionFor(dueAtOrBefore, page.Records[len(page.Records)-1]))
-		if err != nil {
-			return storage.DuePage{}, err
-		}
-		page.NextCursor = cursor
+		page.NextCursor = encodeDueCursor(duePositionFor(dueAtOrBefore, page.Records[len(page.Records)-1]))
 	}
 	return page, nil
 }
@@ -775,60 +731,64 @@ func dueEndAtOrBefore(records map[orderedIdentity]storage.OrderedRecord, entries
 	return low
 }
 
-func (s *orderedStore) encodeRankedCursor(position rankedCursorPosition) (storage.RankedCursor, error) {
-	if err := s.cursorReady(); err != nil {
-		return "", err
-	}
-	payload, err := json.Marshal(rankedCursorPayload{
-		cursorEnvelope: cursorEnvelope{Version: orderedCursorVersion, Kind: rankedCursorTokenKind},
-		Namespace:      position.namespace,
-		RankingScope:   position.rankingScope,
-		Rank:           position.rank,
-		StableKey:      position.stableKey,
-		OrderingScope:  position.orderingScope,
-	})
-	if err != nil {
-		return "", &orderedCursorEncodingError{cause: err}
-	}
-	return storage.RankedCursor(s.encodeCursor(rankedCursorHeader, payload)), nil
+// encodeRankedCursor renders one ranked continuation position as an opaque,
+// versioned, query-bound token. Encoding is total: every field is a bounded
+// string or integer, so issuance cannot fail. The token carries position, never
+// authority; decode re-checks every binding against the live request.
+func encodeRankedCursor(position rankedCursorPosition) storage.RankedCursor {
+	return storage.RankedCursor(encodeOrderedCursorToken(rankedCursorHeader, []string{
+		orderedCursorVersionField,
+		rankedCursorTokenKind,
+		encodeOrderedCursorField(position.namespace),
+		encodeOrderedCursorField(position.rankingScope),
+		strconv.FormatInt(position.rank, 10),
+		encodeOrderedCursorField(string(position.stableKey)),
+		encodeOrderedCursorField(position.orderingScope),
+	}))
 }
 
-func (s *orderedStore) encodeDueCursor(position dueCursorPosition) (storage.DueCursor, error) {
-	if err := s.cursorReady(); err != nil {
-		return "", err
-	}
-	payload, err := json.Marshal(dueCursorPayload{
-		cursorEnvelope: cursorEnvelope{Version: orderedCursorVersion, Kind: dueCursorTokenKind},
-		Namespace:      position.namespace,
-		DueBound:       position.dueBound,
-		DueAt:          position.dueAt,
-		StableKey:      position.stableKey,
-		OrderingScope:  position.orderingScope,
-	})
-	if err != nil {
-		return "", &orderedCursorEncodingError{cause: err}
-	}
-	return storage.DueCursor(s.encodeCursor(dueCursorHeader, payload)), nil
+// encodeDueCursor renders one due continuation position, including the fixed
+// due bound the page was read with, under the same total encoding.
+func encodeDueCursor(position dueCursorPosition) storage.DueCursor {
+	return storage.DueCursor(encodeOrderedCursorToken(dueCursorHeader, []string{
+		orderedCursorVersionField,
+		dueCursorTokenKind,
+		encodeOrderedCursorField(position.namespace),
+		strconv.FormatInt(position.dueBound, 10),
+		strconv.FormatInt(position.dueAt, 10),
+		encodeOrderedCursorField(string(position.stableKey)),
+		encodeOrderedCursorField(position.orderingScope),
+	}))
 }
 
-func (s *orderedStore) encodeCursor(header string, payload []byte) string {
-	encodedPayload := base64.RawURLEncoding.EncodeToString(payload)
-	mac := hmac.New(sha256.New, s.cursorKey[:])
-	mac.Write([]byte(header))
-	mac.Write(payload)
-	encodedMAC := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-	return header + encodedPayload + "." + encodedMAC
+// encodeOrderedCursorToken joins the payload fields and wraps them so callers
+// observe one opaque token. Each variable-length field is encoded separately so
+// the separator can never appear in a name or stable key.
+func encodeOrderedCursorToken(header string, fields []string) string {
+	return header + base64.RawURLEncoding.EncodeToString([]byte(strings.Join(fields, ".")))
+}
+
+func encodeOrderedCursorField(value string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(value))
+}
+
+func decodeOrderedCursorField(field string) (string, bool) {
+	decoded, err := base64.RawURLEncoding.DecodeString(field)
+	if err != nil {
+		return "", false
+	}
+	return string(decoded), true
 }
 
 func (s *orderedStore) decodeRankedCursor(cursor storage.RankedCursor, namespace string, rankingScope string) (rankedCursorPosition, bool, error) {
 	if cursor == "" {
 		return rankedCursorPosition{}, false, nil
 	}
-	payload, err := s.decodeCursor(storage.RankedCursorKind, string(cursor))
+	fields, err := decodeOrderedCursorFields(storage.RankedCursorKind, string(cursor))
 	if err != nil {
 		return rankedCursorPosition{}, false, err
 	}
-	position, ok := parseRankedCursorPayload(payload)
+	position, ok := parseRankedCursorFields(fields)
 	if !ok {
 		return rankedCursorPosition{}, false, storage.NewInvalidOrderedCursorError(storage.RankedCursorKind, string(cursor), storage.OrderedCursorMalformed)
 	}
@@ -842,11 +802,11 @@ func (s *orderedStore) decodeDueCursor(cursor storage.DueCursor, namespace strin
 	if cursor == "" {
 		return dueCursorPosition{}, false, nil
 	}
-	payload, err := s.decodeCursor(storage.DueCursorKind, string(cursor))
+	fields, err := decodeOrderedCursorFields(storage.DueCursorKind, string(cursor))
 	if err != nil {
 		return dueCursorPosition{}, false, err
 	}
-	position, ok := parseDueCursorPayload(payload)
+	position, ok := parseDueCursorFields(fields)
 	if !ok {
 		return dueCursorPosition{}, false, storage.NewInvalidOrderedCursorError(storage.DueCursorKind, string(cursor), storage.OrderedCursorMalformed)
 	}
@@ -856,12 +816,15 @@ func (s *orderedStore) decodeDueCursor(cursor storage.DueCursor, namespace strin
 	return position, true, nil
 }
 
-func (s *orderedStore) decodeCursor(kind storage.OrderedCursorKind, cursor string) ([]byte, error) {
+// decodeOrderedCursorFields parses an untrusted token into its payload fields.
+// It applies the raw length cap before any decoding so an attacker-supplied
+// token cannot drive an unbounded allocation, then classifies every rejection
+// with the contract's four fail-closed rules. Nothing in the token is trusted:
+// the caller compares the decoded namespace, scope, and bound with the live
+// request.
+func decodeOrderedCursorFields(kind storage.OrderedCursorKind, cursor string) ([]string, error) {
 	if len(cursor) > maxOrderedCursorBytes {
 		return nil, storage.NewInvalidOrderedCursorError(kind, cursor, storage.OrderedCursorMalformed)
-	}
-	if err := s.cursorReady(); err != nil {
-		return nil, err
 	}
 	expectedHeader := cursorHeader(kind)
 	if hasUnsupportedCursorVersion(cursor) {
@@ -874,45 +837,24 @@ func (s *orderedStore) decodeCursor(kind storage.OrderedCursorKind, cursor strin
 		return nil, storage.NewInvalidOrderedCursorError(kind, cursor, storage.OrderedCursorMalformed)
 	}
 
-	body := strings.TrimPrefix(cursor, expectedHeader)
-	encodedPayload, encodedMAC, found := strings.Cut(body, ".")
-	if !found || encodedPayload == "" || encodedMAC == "" || strings.Contains(encodedMAC, ".") {
-		return nil, storage.NewInvalidOrderedCursorError(kind, cursor, storage.OrderedCursorMalformed)
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(encodedPayload)
+	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(cursor, expectedHeader))
 	if err != nil {
 		return nil, storage.NewInvalidOrderedCursorError(kind, cursor, storage.OrderedCursorMalformed)
 	}
-	providedMAC, err := base64.RawURLEncoding.DecodeString(encodedMAC)
-	if err != nil || len(providedMAC) != orderedCursorMACBytes {
+	fields := strings.Split(string(payload), ".")
+	if len(fields) != orderedCursorFieldCount {
 		return nil, storage.NewInvalidOrderedCursorError(kind, cursor, storage.OrderedCursorMalformed)
 	}
-	mac := hmac.New(sha256.New, s.cursorKey[:])
-	mac.Write([]byte(expectedHeader))
-	mac.Write(payload)
-	if !hmac.Equal(providedMAC, mac.Sum(nil)) {
-		return nil, storage.NewInvalidOrderedCursorError(kind, cursor, storage.OrderedCursorMalformed)
-	}
-	var envelope cursorEnvelope
-	if err := json.Unmarshal(payload, &envelope); err != nil {
-		return nil, storage.NewInvalidOrderedCursorError(kind, cursor, storage.OrderedCursorMalformed)
-	}
-	if envelope.Version != orderedCursorVersion {
+	if fields[0] != orderedCursorVersionField {
 		return nil, storage.NewInvalidOrderedCursorError(kind, cursor, storage.OrderedCursorUnknownVersion)
 	}
-	if envelope.Kind != cursorTokenKind(kind) {
-		return nil, storage.NewInvalidOrderedCursorError(kind, cursor, storage.OrderedCursorWrongKind)
+	if fields[1] != cursorTokenKind(kind) {
+		if fields[1] == rankedCursorTokenKind || fields[1] == dueCursorTokenKind {
+			return nil, storage.NewInvalidOrderedCursorError(kind, cursor, storage.OrderedCursorWrongKind)
+		}
+		return nil, storage.NewInvalidOrderedCursorError(kind, cursor, storage.OrderedCursorMalformed)
 	}
-	return payload, nil
-}
-
-// cursorReady prevents opaque cursor issuance and verification after the
-// provider failed to obtain a complete cryptographic key at construction.
-func (s *orderedStore) cursorReady() error {
-	if s.cursorErr != nil {
-		return &orderedCursorEntropyError{cause: s.cursorErr}
-	}
-	return nil
+	return fields, nil
 }
 
 // hasUnsupportedCursorVersion recognizes the version prefix before decoding a
@@ -948,54 +890,39 @@ func cursorTokenKind(kind storage.OrderedCursorKind) string {
 	return dueCursorTokenKind
 }
 
-type cursorEnvelope struct {
-	Version uint8  `json:"v"`
-	Kind    string `json:"k"`
-}
-
-type rankedCursorPayload struct {
-	cursorEnvelope
-	Namespace     string            `json:"n"`
-	RankingScope  string            `json:"s"`
-	Rank          int64             `json:"r"`
-	StableKey     storage.StableKey `json:"i"`
-	OrderingScope string            `json:"o"`
-}
-
-type dueCursorPayload struct {
-	cursorEnvelope
-	Namespace     string            `json:"n"`
-	DueBound      int64             `json:"b"`
-	DueAt         int64             `json:"d"`
-	StableKey     storage.StableKey `json:"i"`
-	OrderingScope string            `json:"o"`
-}
-
-func parseRankedCursorPayload(payload []byte) (rankedCursorPosition, bool) {
-	var decoded rankedCursorPayload
-	if err := json.Unmarshal(payload, &decoded); err != nil {
+func parseRankedCursorFields(fields []string) (rankedCursorPosition, bool) {
+	namespace, namespaceOK := decodeOrderedCursorField(fields[2])
+	rankingScope, rankingScopeOK := decodeOrderedCursorField(fields[3])
+	rank, rankErr := strconv.ParseInt(fields[4], 10, 64)
+	stableKey, stableKeyOK := decodeOrderedCursorField(fields[5])
+	orderingScope, orderingScopeOK := decodeOrderedCursorField(fields[6])
+	if !namespaceOK || !rankingScopeOK || rankErr != nil || !stableKeyOK || !orderingScopeOK {
 		return rankedCursorPosition{}, false
 	}
 	return rankedCursorPosition{
-		namespace:     decoded.Namespace,
-		rankingScope:  decoded.RankingScope,
-		rank:          decoded.Rank,
-		stableKey:     decoded.StableKey,
-		orderingScope: decoded.OrderingScope,
+		namespace:     namespace,
+		rankingScope:  rankingScope,
+		rank:          rank,
+		stableKey:     storage.StableKey(stableKey),
+		orderingScope: orderingScope,
 	}, true
 }
 
-func parseDueCursorPayload(payload []byte) (dueCursorPosition, bool) {
-	var decoded dueCursorPayload
-	if err := json.Unmarshal(payload, &decoded); err != nil {
+func parseDueCursorFields(fields []string) (dueCursorPosition, bool) {
+	namespace, namespaceOK := decodeOrderedCursorField(fields[2])
+	dueBound, dueBoundErr := strconv.ParseInt(fields[3], 10, 64)
+	dueAt, dueAtErr := strconv.ParseInt(fields[4], 10, 64)
+	stableKey, stableKeyOK := decodeOrderedCursorField(fields[5])
+	orderingScope, orderingScopeOK := decodeOrderedCursorField(fields[6])
+	if !namespaceOK || dueBoundErr != nil || dueAtErr != nil || !stableKeyOK || !orderingScopeOK {
 		return dueCursorPosition{}, false
 	}
 	return dueCursorPosition{
-		namespace:     decoded.Namespace,
-		dueBound:      decoded.DueBound,
-		dueAt:         decoded.DueAt,
-		stableKey:     decoded.StableKey,
-		orderingScope: decoded.OrderingScope,
+		namespace:     namespace,
+		dueBound:      dueBound,
+		dueAt:         dueAt,
+		stableKey:     storage.StableKey(stableKey),
+		orderingScope: orderingScope,
 	}, true
 }
 
@@ -1008,35 +935,4 @@ type orderedOrderExhaustedError struct{}
 
 func (*orderedOrderExhaustedError) Error() string {
 	return "memstore: ordered acceptance order exhausted"
-}
-
-// orderedCursorEntropyError is returned only when crypto/rand could not create
-// the per-store HMAC key required to issue or verify opaque cursors. Its Error
-// string intentionally omits the underlying system error; callers that need it
-// can use errors.Is/As through Unwrap.
-type orderedCursorEntropyError struct {
-	cause error
-}
-
-func (e *orderedCursorEntropyError) Error() string {
-	return "memstore: ordered cursor entropy unavailable"
-}
-
-func (e *orderedCursorEntropyError) Unwrap() error {
-	return e.cause
-}
-
-// orderedCursorEncodingError reports the otherwise unexpected failure to JSON
-// encode one of this provider's fully validated cursor positions. The error is
-// typed and fail-closed; its rendered text does not disclose cursor contents.
-type orderedCursorEncodingError struct {
-	cause error
-}
-
-func (e *orderedCursorEncodingError) Error() string {
-	return "memstore: ordered cursor encoding failed"
-}
-
-func (e *orderedCursorEncodingError) Unwrap() error {
-	return e.cause
 }

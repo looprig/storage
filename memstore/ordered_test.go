@@ -3,7 +3,6 @@ package memstore
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"reflect"
@@ -537,73 +536,28 @@ func TestOrderedCanceledContextDoesNotMutate(t *testing.T) {
 	}
 }
 
-func TestOrderedCursorEntropyFailureDoesNotIssueNextCursor(t *testing.T) {
+func TestOrderedCursorRejectsOversizedToken(t *testing.T) {
 	t.Parallel()
 
-	store := newOrderedStoreWithCursorReader(partialFailingCursorKeyReader{err: errInjectedCursorEntropy})
-	if !errors.Is(store.cursorErr, errInjectedCursorEntropy) {
-		t.Fatalf("cursor key initialization error = %v, want injected entropy failure", store.cursorErr)
-	}
-	if store.cursorKey != [sha256.Size]byte{} {
-		t.Fatal("cursor key retained partial entropy after initialization failed")
-	}
-	firstID := orderedTestID("acceptance", "first")
-	secondID := orderedTestID("acceptance", "second")
-	for _, id := range []storage.OrderedID{firstID, secondID} {
-		mustCreateOrdered(t, store, id, "workers", []byte(id.StableKey), storage.Rank{Ranked: true, Value: 1}, storage.Due{State: storage.DueAt, UnixMillis: 1})
-	}
-
-	tests := []struct {
-		name string
-		list func(*testing.T) error
-	}{
-		{
-			name: "ranked",
-			list: func(t *testing.T) error {
-				page, err := store.ListRanked(context.Background(), "sessions", "workers", "", 1)
-				if page.NextCursor != "" {
-					t.Errorf("ListRanked() issued cursor %q despite entropy failure", page.NextCursor)
-				}
-				return err
-			},
-		},
-		{
-			name: "due",
-			list: func(t *testing.T) error {
-				page, err := store.ListDue(context.Background(), "sessions", 1, "", 1)
-				if page.NextCursor != "" {
-					t.Errorf("ListDue() issued cursor %q despite entropy failure", page.NextCursor)
-				}
-				return err
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			err := tt.list(t)
-			if err == nil {
-				t.Fatal("list returned nil error despite needing a continuation cursor")
-			}
-			var target *orderedCursorEntropyError
-			if !errors.As(err, &target) || !errors.Is(err, errInjectedCursorEntropy) {
-				t.Errorf("list error = %T %v, want wrapped *orderedCursorEntropyError", err, err)
-			}
-		})
-	}
-}
-
-func TestOrderedCursorRejectsOversizedSignedToken(t *testing.T) {
-	t.Parallel()
-
-	// The payloads are otherwise valid, HMAC-authenticated v1 cursors with an
-	// ignored JSON field. They prove the raw-token limit is applied before a
-	// decoder can allocate or unmarshal attacker-controlled padding.
+	// Each token starts as a real cursor this store just issued and is then
+	// padded past the bounded diagnostic length. They prove the raw-token
+	// limit is applied before a decoder can allocate or parse attacker-supplied
+	// padding.
 	const paddingBytes = 96 << 10
 	paddingMarker := "opaque-cursor-padding-"
 	padding := strings.Repeat(paddingMarker, paddingBytes/len(paddingMarker)+1)
-	store := newOrderedStore()
+	index := orderedTestIndex(t)
+	for _, key := range []storage.StableKey{"first", "second"} {
+		mustCreateOrdered(t, index, orderedTestID("acceptance", key), "workers", []byte(key), storage.Rank{Ranked: true, Value: 1}, storage.Due{State: storage.DueAt, UnixMillis: 1})
+	}
+	rankedPage, err := index.ListRanked(context.Background(), "sessions", "workers", "", 1)
+	if err != nil || rankedPage.NextCursor == "" {
+		t.Fatalf("ListRanked(first page) = %v, cursor %q; want a continuation cursor", err, rankedPage.NextCursor)
+	}
+	duePage, err := index.ListDue(context.Background(), "sessions", 1, "", 1)
+	if err != nil || duePage.NextCursor == "" {
+		t.Fatalf("ListDue(first page) = %v, cursor %q; want a continuation cursor", err, duePage.NextCursor)
+	}
 
 	tests := []struct {
 		name   string
@@ -614,18 +568,18 @@ func TestOrderedCursorRejectsOversizedSignedToken(t *testing.T) {
 		{
 			name:   "ranked",
 			kind:   storage.RankedCursorKind,
-			cursor: store.encodeCursor(rankedCursorHeader, []byte(fmt.Sprintf(`{"v":1,"k":"ranked","n":"sessions","s":"workers","r":0,"i":"key","o":"scope","padding":"%s"}`, padding))),
+			cursor: string(rankedPage.NextCursor) + padding,
 			list: func(cursor string) error {
-				_, err := store.ListRanked(context.Background(), "sessions", "workers", storage.RankedCursor(cursor), 1)
+				_, err := index.ListRanked(context.Background(), "sessions", "workers", storage.RankedCursor(cursor), 1)
 				return err
 			},
 		},
 		{
 			name:   "due",
 			kind:   storage.DueCursorKind,
-			cursor: store.encodeCursor(dueCursorHeader, []byte(fmt.Sprintf(`{"v":1,"k":"due","n":"sessions","b":0,"d":0,"i":"key","o":"scope","padding":"%s"}`, padding))),
+			cursor: string(duePage.NextCursor) + padding,
 			list: func(cursor string) error {
-				_, err := store.ListDue(context.Background(), "sessions", 0, storage.DueCursor(cursor), 1)
+				_, err := index.ListDue(context.Background(), "sessions", 1, storage.DueCursor(cursor), 1)
 				return err
 			},
 		},
@@ -639,7 +593,7 @@ func TestOrderedCursorRejectsOversizedSignedToken(t *testing.T) {
 			}
 			err := tt.list(tt.cursor)
 			if err == nil {
-				t.Fatal("oversized signed cursor returned nil error")
+				t.Fatal("oversized cursor returned nil error")
 			}
 			requireCursorError(t, err, tt.kind, storage.OrderedCursorMalformed)
 			var target *storage.InvalidOrderedCursorError
@@ -656,58 +610,10 @@ func TestOrderedCursorRejectsOversizedSignedToken(t *testing.T) {
 	}
 }
 
-func TestOrderedStoreFormattingRedactsSecrets(t *testing.T) {
-	t.Parallel()
-
-	// Exercise the public composition path: callers receive an OrderedIndex
-	// interface whose dynamic value is the unexported orderedStore.
-	index := New().OrderedIndex
-	store, ok := index.(*orderedStore)
-	if !ok {
-		t.Fatalf("New().OrderedIndex dynamic type = %T, want *orderedStore", index)
-	}
-	for i := range store.cursorKey {
-		store.cursorKey[i] = byte(i + 1)
-	}
-	secretValue := []byte("stored-value-secret-not-for-formatting")
-	if _, created, err := index.Create(context.Background(), orderedTestID("acceptance", "formatting"), "workers", secretValue, storage.Rank{}, storage.Due{State: storage.NotDue}); err != nil || !created {
-		t.Fatalf("Create(secret record) = created %v, err %v; want true, nil", created, err)
-	}
-
-	for _, verb := range []string{"%v", "%+v", "%#v"} {
-		t.Run(verb, func(t *testing.T) {
-			rendered := fmt.Sprintf(verb, index)
-			for _, secret := range []string{
-				string(secretValue),
-				fmt.Sprintf(verb, store.cursorKey),
-				fmt.Sprintf(verb, secretValue),
-			} {
-				if strings.Contains(rendered, secret) {
-					t.Errorf("fmt.Sprintf(%q, New().OrderedIndex) leaked secret %q in %q", verb, secret, rendered)
-				}
-			}
-		})
-	}
-}
-
 type errObservedContext struct {
 	context.Context
 	errObserved chan struct{}
 	once        sync.Once
-}
-
-var errInjectedCursorEntropy = errors.New("injected cursor entropy failure")
-
-type partialFailingCursorKeyReader struct {
-	err error
-}
-
-func (r partialFailingCursorKeyReader) Read(p []byte) (int, error) {
-	if len(p) == 0 {
-		return 0, r.err
-	}
-	p[0] = 1
-	return 1, r.err
 }
 
 func (c *errObservedContext) Err() error {
@@ -899,7 +805,7 @@ func FuzzOrderedCursorRejectsMalformedTokens(f *testing.F) {
 		"",
 		"not-a-cursor",
 		"v1:r:",
-		"v1:d:payload.signature",
+		"v1:d:cGF5bG9hZA",
 		"v13:r:opaque",
 		strings.Repeat("opaque-token-", 128),
 	} {
@@ -999,5 +905,72 @@ func assertFuzzCursorOutcome(t *testing.T, token string, list func() error) {
 	}
 	if token != "" && strings.Contains(err.Error(), token) {
 		t.Errorf("cursor error = %q, must not expose opaque token %q", err, token)
+	}
+}
+
+// TestOrderedCursorsAreInstanceIndependent pins the opaque cursor encoding to
+// position rather than per-process authority. A cursor is versioned, kind
+// tagged, and query bound, and every binding is re-checked against the live
+// request; it grants nothing a caller could not ask for directly. Two
+// independently constructed stores holding the same records must therefore
+// issue byte-identical continuation tokens and accept each other's, which is
+// the only behavior a multi-replica provider can implement.
+func TestOrderedCursorsAreInstanceIndependent(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	build := func() storage.OrderedIndex {
+		index := orderedTestIndex(t)
+		for _, key := range []storage.StableKey{"alpha", "beta", "gamma"} {
+			mustCreateOrdered(t, index, orderedTestID("acceptance", key), "workers", []byte(key), storage.Rank{Ranked: true, Value: 1}, storage.Due{State: storage.DueAt, UnixMillis: 1})
+		}
+		return index
+	}
+	issuer, replica := build(), build()
+
+	issuedRanked, err := issuer.ListRanked(ctx, "sessions", "workers", "", 1)
+	if err != nil || issuedRanked.NextCursor == "" {
+		t.Fatalf("ListRanked(issuer first page) = %v, cursor %q; want a continuation cursor", err, issuedRanked.NextCursor)
+	}
+	replicaRanked, err := replica.ListRanked(ctx, "sessions", "workers", "", 1)
+	if err != nil {
+		t.Fatalf("ListRanked(replica first page) unexpected error: %v", err)
+	}
+	if replicaRanked.NextCursor != issuedRanked.NextCursor {
+		t.Errorf("replica ranked cursor = %q, want issuer cursor %q", replicaRanked.NextCursor, issuedRanked.NextCursor)
+	}
+	issuerRest, err := issuer.ListRanked(ctx, "sessions", "workers", issuedRanked.NextCursor, 10)
+	if err != nil {
+		t.Fatalf("ListRanked(issuer continuation) unexpected error: %v", err)
+	}
+	replicaRest, err := replica.ListRanked(ctx, "sessions", "workers", issuedRanked.NextCursor, 10)
+	if err != nil {
+		t.Fatalf("ListRanked(replica continuation of issuer cursor) unexpected error: %v", err)
+	}
+	if got, want := orderedStableKeys(replicaRest.Records), orderedStableKeys(issuerRest.Records); !reflect.DeepEqual(got, want) {
+		t.Errorf("replica ranked continuation = %v, want %v", got, want)
+	}
+
+	issuedDue, err := issuer.ListDue(ctx, "sessions", 1, "", 1)
+	if err != nil || issuedDue.NextCursor == "" {
+		t.Fatalf("ListDue(issuer first page) = %v, cursor %q; want a continuation cursor", err, issuedDue.NextCursor)
+	}
+	replicaDue, err := replica.ListDue(ctx, "sessions", 1, "", 1)
+	if err != nil {
+		t.Fatalf("ListDue(replica first page) unexpected error: %v", err)
+	}
+	if replicaDue.NextCursor != issuedDue.NextCursor {
+		t.Errorf("replica due cursor = %q, want issuer cursor %q", replicaDue.NextCursor, issuedDue.NextCursor)
+	}
+	issuerDueRest, err := issuer.ListDue(ctx, "sessions", 1, issuedDue.NextCursor, 10)
+	if err != nil {
+		t.Fatalf("ListDue(issuer continuation) unexpected error: %v", err)
+	}
+	replicaDueRest, err := replica.ListDue(ctx, "sessions", 1, issuedDue.NextCursor, 10)
+	if err != nil {
+		t.Fatalf("ListDue(replica continuation of issuer cursor) unexpected error: %v", err)
+	}
+	if got, want := orderedStableKeys(replicaDueRest.Records), orderedStableKeys(issuerDueRest.Records); !reflect.DeepEqual(got, want) {
+		t.Errorf("replica due continuation = %v, want %v", got, want)
 	}
 }

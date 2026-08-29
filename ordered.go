@@ -84,7 +84,9 @@ type OrderedRecord struct {
 // scope, and ranked query that issued it. ListRanked must return
 // *InvalidOrderedCursorError with Kind RankedCursorKind for a malformed token,
 // an unknown token version, a token issued for another cursor kind, or a query
-// mismatch.
+// mismatch. A cursor conveys position, not authority: a provider re-checks the
+// namespace and ranking scope against the live request and never trusts them
+// from the token.
 type RankedCursor string
 
 // DueCursor is a provider-issued, opaque, versioned continuation token for
@@ -92,7 +94,9 @@ type RankedCursor string
 // and due query that issued it. ListDue must return
 // *InvalidOrderedCursorError with Kind DueCursorKind for a malformed token, an
 // unknown token version, a token issued for another cursor kind, or a query
-// mismatch.
+// mismatch. A cursor conveys position, not authority: a provider re-checks the
+// namespace and due bound against the live request and never trusts them from
+// the token.
 type DueCursor string
 
 // OrderedPage is a page from ListOrdered. NextAfterOrder is zero when no rows
