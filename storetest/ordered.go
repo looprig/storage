@@ -1035,9 +1035,7 @@ func testOrderedIndexDeletePreventsReuse(t *testing.T, newBackend OrderedIndexFa
 
 func orderedIndexContext(t *testing.T) context.Context {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), conformanceTimeout)
-	t.Cleanup(cancel)
-	return ctx
+	return conformanceContext(t)
 }
 
 func freshOrderedIndex(t *testing.T, newBackend OrderedIndexFactory) storage.OrderedIndex {

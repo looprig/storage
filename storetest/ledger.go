@@ -2,7 +2,6 @@ package storetest
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"strconv"
 	"sync"
@@ -14,7 +13,7 @@ import (
 // TestLedger runs the Ledger conformance suite. newBackend must return a fresh,
 // empty Ledger; register any cleanup via t.Cleanup inside newBackend.
 func TestLedger(t *testing.T, newBackend func(t *testing.T) storage.Ledger) {
-	ctx := context.Background()
+	ctx := conformanceContext(t)
 
 	t.Run("append read round-trip with 1-based seq", func(t *testing.T) {
 		l := newBackend(t)

@@ -17,7 +17,7 @@ import (
 // Cross-process reclaim (a dead holder's lease being reclaimed by the backend's
 // native mechanism) is "where testable" and left to each backend's own tests.
 func TestLeaser(t *testing.T, newBackend func(t *testing.T) storage.Leaser) {
-	ctx := context.Background()
+	ctx := conformanceContext(t)
 
 	t.Run("acquire on a free name grants a live lease", func(t *testing.T) {
 		le := newBackend(t)
@@ -186,7 +186,7 @@ type LeaserLifecycleFactory func(t *testing.T) LeaserLifecycleHarness
 // deterministic lifecycle harness.
 func TestLeaserLifecycle(t *testing.T, newHarness LeaserLifecycleFactory) {
 	t.Helper()
-	ctx := context.Background()
+	ctx := conformanceContext(t)
 
 	t.Run("renewal keeps the same epoch live", func(t *testing.T) {
 		harness := requireLeaserLifecycleHarness(t, newHarness)
@@ -352,7 +352,11 @@ func registerLifecycleLeaseCleanup(t *testing.T, lease storage.Lease) {
 		t.Fatal("Acquire returned a nil lease on success")
 	}
 	t.Cleanup(func() {
-		if err := lease.Release(context.Background()); err != nil {
+		// Bound the release directly rather than through conformanceContext:
+		// this runs during cleanup, which is too late to register another one.
+		ctx, cancel := context.WithTimeout(context.Background(), conformanceTimeout)
+		defer cancel()
+		if err := lease.Release(ctx); err != nil {
 			t.Errorf("Release cleanup: %v", err)
 		}
 	})

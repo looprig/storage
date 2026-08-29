@@ -2,7 +2,6 @@ package storetest
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"strconv"
 	"testing"
@@ -13,7 +12,7 @@ import (
 // TestKV runs the KV conformance suite. newBackend must return a fresh, empty
 // KV; register any cleanup via t.Cleanup inside newBackend.
 func TestKV(t *testing.T, newBackend func(t *testing.T) storage.KV) {
-	ctx := context.Background()
+	ctx := conformanceContext(t)
 
 	t.Run("get absent returns KeyNotFoundError", func(t *testing.T) {
 		kv := newBackend(t)

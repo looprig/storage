@@ -15,10 +15,27 @@ import (
 // payloads are the engine's responsibility to offload to Blobs.
 const payloadFloor = 1 << 20
 
-// conformanceTimeout bounds each provider interaction in a shared suite. It
-// keeps a stalled remote backend from making an entire conformance run hang
-// while leaving ordinary local and networked implementations ample time.
-const conformanceTimeout = 5 * time.Second
+// conformanceTimeout is a whole-run stall guard, not a per-interaction budget:
+// one context bounds every provider interaction the suite function that created
+// it makes, so a case doing a hundred creates gets this much time in total. It
+// exists so a wedged remote backend fails its own suite instead of hanging the
+// test binary — a stalled call under an unbounded context takes the entire
+// package down with "test timed out", naming nothing. It is deliberately
+// generous: the OrderedIndex suite runs two hundred concurrent creates in one
+// case, which against a containerized JetStream or Postgres is legitimately
+// slow, and a stall guard that fires on a slow-but-working backend is worse
+// than none.
+const conformanceTimeout = 30 * time.Second
+
+// conformanceContext returns the bounded context a suite runs under, cancelled
+// when the test that created it finishes. Every suite in this package uses it;
+// none takes context.Background().
+func conformanceContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), conformanceTimeout)
+	t.Cleanup(cancel)
+	return ctx
+}
 
 // invalidName pairs a name that violates the storage grammar with a human label
 // used to name its subtest.
@@ -83,7 +100,7 @@ func isClosed(ch <-chan struct{}) bool {
 // any error, so it must never be invoked from a spawned goroutine.
 func readAll(t *testing.T, l storage.Ledger, name string, from uint64) []storage.Record {
 	t.Helper()
-	ctx := context.Background()
+	ctx := conformanceContext(t)
 	cur, err := l.Read(ctx, name, from)
 	if err != nil {
 		t.Fatalf("Read(%q, %d): unexpected error: %v", name, from, err)
