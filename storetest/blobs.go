@@ -2,7 +2,6 @@ package storetest
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"testing"
 
@@ -12,7 +11,7 @@ import (
 // TestBlobs runs the Blobs conformance suite. newBackend must return a fresh,
 // empty Blobs; register any cleanup via t.Cleanup inside newBackend.
 func TestBlobs(t *testing.T, newBackend func(t *testing.T) storage.Blobs) {
-	ctx := context.Background()
+	ctx := conformanceContext(t)
 
 	t.Run("put get round-trip", func(t *testing.T) {
 		cases := []struct {

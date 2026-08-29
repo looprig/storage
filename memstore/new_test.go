@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"testing"
+
+	"github.com/looprig/storage"
 )
 
 // TestNewComposite asserts New() returns a fully-wired *storage.Composite: all
-// four embedded providers are non-nil and each is independently callable through
+// five providers are non-nil and each is independently callable through
 // its named field. It is a wiring smoke test — the per-primitive semantics are
 // pinned by the ledger/lease/kv/blobs tests.
 func TestNewComposite(t *testing.T) {
@@ -18,9 +20,9 @@ func TestNewComposite(t *testing.T) {
 	if c == nil {
 		t.Fatal("New() returned nil Composite")
 	}
-	if c.Ledger == nil || c.Leaser == nil || c.KV == nil || c.Blobs == nil {
-		t.Fatalf("New() left a nil field: Ledger=%v Leaser=%v KV=%v Blobs=%v",
-			c.Ledger == nil, c.Leaser == nil, c.KV == nil, c.Blobs == nil)
+	if c.Ledger == nil || c.Leaser == nil || c.KV == nil || c.Blobs == nil || c.OrderedIndex == nil {
+		t.Fatalf("New() left a nil field: Ledger=%v Leaser=%v KV=%v Blobs=%v OrderedIndex=%v",
+			c.Ledger == nil, c.Leaser == nil, c.KV == nil, c.Blobs == nil, c.OrderedIndex == nil)
 	}
 
 	// Ledger: fresh ledger tip is 0, then an append advances it.
@@ -58,5 +60,13 @@ func TestNewComposite(t *testing.T) {
 	}
 	if err := lease.Release(ctx); err != nil {
 		t.Errorf("Lease.Release() unexpected error: %v", err)
+	}
+
+	// OrderedIndex: Create allocates the first immutable order.
+	record, created, err := c.OrderedIndex.Create(ctx,
+		storage.OrderedID{Namespace: "sessions", OrderingScope: "acceptance", StableKey: "first"},
+		"workers", []byte("value"), storage.Rank{}, storage.Due{State: storage.NotDue})
+	if err != nil || !created || record.Order != 1 || record.Revision != 1 {
+		t.Fatalf("OrderedIndex.Create() = %#v, %v, %v; want revision/order 1 created record", record, created, err)
 	}
 }

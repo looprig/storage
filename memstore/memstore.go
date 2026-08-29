@@ -1,9 +1,9 @@
-// Package memstore is the in-memory reference backend for storage's four
+// Package memstore is the in-memory reference backend for storage's five
 // primitives. It is the conformance oracle other backends are checked against:
-// correct, allocation-simple, and dependency-free. Because the four primitives
+// correct, allocation-simple, and dependency-free. Because several primitives
 // have colliding method names (Ledger/KV/Blobs all declare Delete; KV and Blobs
 // declare Get/Put with different signatures), no single Go type can satisfy all
-// four — so memstore is built as four separate unexported backing types that are
+// five — so memstore is built as separate unexported backing types that are
 // wired into a *storage.Composite at the composition root.
 package memstore
 
@@ -16,12 +16,12 @@ import (
 )
 
 // New assembles the in-memory reference backend: a *storage.Composite wiring
-// one fresh backing store per primitive (ledger, leaser, KV, blobs). All four
-// providers are non-nil, so the underlying NewComposite can never report an
-// incomplete composite — a non-nil error here is impossible and is treated as an
-// unrecoverable programmer error (panic) rather than propagated.
+// one fresh backing store per primitive (ledger, leaser, KV, blobs, ordered
+// index). All five providers are non-nil, so the underlying NewComposite can
+// never report an incomplete composite — a non-nil error here is impossible
+// and is treated as an unrecoverable programmer error (panic) rather than propagated.
 func New() *storage.Composite {
-	c, err := storage.NewComposite(newLedgerStore(), newLeaserStore(), newKVStore(), newBlobStore())
+	c, err := storage.NewCompositeWithOrderedIndex(newLedgerStore(), newLeaserStore(), newKVStore(), newBlobStore(), newOrderedStore())
 	if err != nil {
 		panic(err) // unreachable: every primitive above is non-nil
 	}

@@ -1,9 +1,9 @@
 # Contributing to looprig/storage
 
 Thanks for considering a contribution. `storage` is the leaf module that
-defines the Ledger/Leaser/KV/Blobs contracts and an in-memory reference
-backend; several sibling repos in the looprig ecosystem depend on it. This
-file is the short guide for working in *this* repository.
+defines the Ledger/Leaser/KV/Blobs/OrderedIndex contracts and an in-memory
+reference backend; several sibling repos in the looprig ecosystem depend on
+it. This file is the short guide for working in *this* repository.
 
 ## Before you write code
 
@@ -19,7 +19,16 @@ file is the short guide for working in *this* repository.
    discussion before writing code, don't route around it.
 3. Open an issue for anything non-trivial so direction can be agreed before
    you spend the time, especially for anything that touches the public
-   contracts (`Ledger`, `Leaser`, `KV`, `Blobs`, name/path validation).
+   contracts (`Ledger`, `Leaser`, `KV`, `Blobs`, `OrderedIndex`, name/path
+   validation).
+
+## Composition compatibility
+
+`NewComposite` is the legacy four-primitive constructor: it deliberately
+leaves `OrderedIndex` nil and never synthesizes one. Use
+`NewCompositeWithOrderedIndex` when a consumer requires all five primitives.
+Preserve that distinction unless a reviewed public-contract change explicitly
+authorizes it.
 
 ## Design and security rules (the short version)
 
@@ -87,11 +96,11 @@ Every Go command in the Makefile runs with `GOWORK=off` so the parent
   design alternative you rejected, and how you verified. `make check` (and
   ideally `make secure`) output is welcome in the PR body.
 - **This module is depended on by several sibling repos** (harness and the
-  storage backend modules among them). Treat any change to a public
-  contract — `Ledger`, `Leaser`, `KV`, `Blobs`, name/path validation, or
-  exported error types — as a breaking-change candidate: call it out
-  explicitly in the PR description and think through who downstream needs
-  to update.
+  storage backend modules among them). Treat any change to a public contract
+  — `Ledger`, `Leaser`, `KV`, `Blobs`, `OrderedIndex`, composition
+  constructors, name/path validation, or exported error types — as a
+  breaking-change candidate: call it out explicitly in the PR description
+  and think through who downstream needs to update.
 - Don't force-push after review; add commits and let the reviewer squash.
 - Don't commit secrets, tokens, or credentials. Don't add a new external
   dependency — see the dependency rule above; this is not negotiable via

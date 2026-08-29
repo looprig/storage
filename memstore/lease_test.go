@@ -15,7 +15,9 @@ import (
 // detail). The shared behaviors (grant on a free name, LeaseHeldError while
 // held, strictly-increasing epochs across grant/release/grant, per-name
 // independence, Release closing Lost, idempotent double-Release, and invalid
-// names) live in package storetest.
+// names) live in package storetest. The package-internal lifecycle conformance
+// harness in leaser_lifecycle_conformance_test.go separately simulates renewal
+// and expiry without adding those controls to the production memstore API.
 
 // TestLeaserAcquireContention races many goroutines to Acquire the SAME free
 // name. Exactly one must win the grant; the rest must see a *LeaseHeldError.
