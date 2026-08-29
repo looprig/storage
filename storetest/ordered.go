@@ -1,0 +1,921 @@
+package storetest
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"reflect"
+	"sort"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/looprig/storage"
+)
+
+// OrderedIndexFactory returns a fresh, empty OrderedIndex for one conformance
+// subtest.
+type OrderedIndexFactory func(t *testing.T) storage.OrderedIndex
+
+// OrderedIndexCounters optionally asserts provider-specific query-work
+// counters against a fresh OrderedIndex under the suite's bounded context. The
+// concrete measurements are intentionally provider-owned: semantic conformance
+// must not prescribe a filesystem walk, a JetStream scan, or a database
+// buffer-read unit.
+type OrderedIndexCounters interface {
+	Assert(t *testing.T, ctx context.Context, index storage.OrderedIndex)
+}
+
+// OrderedIndexCounterFunc adapts an assertion function for
+// OrderedIndexCounters, so a provider can keep its instrumentation seam local
+// to its conformance test.
+type OrderedIndexCounterFunc func(t *testing.T, ctx context.Context, index storage.OrderedIndex)
+
+// Assert invokes f as an OrderedIndexCounters assertion.
+func (f OrderedIndexCounterFunc) Assert(t *testing.T, ctx context.Context, index storage.OrderedIndex) {
+	if f == nil {
+		t.Fatal("nil OrderedIndexCounterFunc")
+	}
+	f(t, ctx, index)
+}
+
+// TestOrderedIndex runs the provider-neutral OrderedIndex conformance suite.
+// newBackend must return a fresh, empty provider and may register cleanup with
+// t.Cleanup. Every test receives a bounded context and reports record identity
+// on failures so remote providers can use the same suite safely. counters is
+// optional and, when provided, runs one provider-defined bounded-work check on
+// another fresh provider.
+func TestOrderedIndex(t *testing.T, newBackend OrderedIndexFactory, counters ...OrderedIndexCounters) {
+	if newBackend == nil {
+		t.Fatal("TestOrderedIndex requires a non-nil factory")
+	}
+	if len(counters) > 1 {
+		t.Fatal("TestOrderedIndex accepts at most one optional counter assertion")
+	}
+
+	t.Run("TestOrderedIndexCreateAssignsImmutableOrder", func(t *testing.T) {
+		testOrderedIndexCreateAssignsImmutableOrder(t, newBackend)
+	})
+	t.Run("TestOrderedIndexDuplicateReturnsOriginal", func(t *testing.T) {
+		testOrderedIndexDuplicateReturnsOriginal(t, newBackend)
+	})
+	t.Run("TestOrderedIndexScopesIdentity", func(t *testing.T) {
+		testOrderedIndexScopesIdentity(t, newBackend)
+	})
+	t.Run("TestOrderedIndexCASUpdateChangesValueRankAndDueAtomically", func(t *testing.T) {
+		testOrderedIndexCASUpdateChangesValueRankAndDueAtomically(t, newBackend)
+	})
+	t.Run("TestOrderedIndexWrongRevisionLeavesStateUntouched", func(t *testing.T) {
+		testOrderedIndexWrongRevisionLeavesStateUntouched(t, newBackend)
+	})
+	t.Run("TestOrderedIndexListOrderedPagesInAcceptanceOrder", func(t *testing.T) {
+		testOrderedIndexListOrderedPagesInAcceptanceOrder(t, newBackend)
+	})
+	t.Run("TestOrderedIndexListRankedPagesByRankAndStableKey", func(t *testing.T) {
+		testOrderedIndexListRankedPagesByRankAndStableKey(t, newBackend)
+	})
+	t.Run("TestOrderedIndexRankMoveUpdatesAuthoritativePage", func(t *testing.T) {
+		testOrderedIndexRankMoveUpdatesAuthoritativePage(t, newBackend)
+	})
+	t.Run("TestOrderedIndexListDuePagesByDeadlineAndStableKey", func(t *testing.T) {
+		testOrderedIndexListDuePagesByDeadlineAndStableKey(t, newBackend)
+	})
+	t.Run("TestOrderedIndexNotDueNeverAppearsInDuePages", func(t *testing.T) {
+		testOrderedIndexNotDueNeverAppearsInDuePages(t, newBackend)
+	})
+	t.Run("TestOrderedIndexTerminalRecordsDoNotFillPages", func(t *testing.T) {
+		testOrderedIndexTerminalRecordsDoNotFillPages(t, newBackend)
+	})
+	t.Run("TestOrderedIndexConcurrentDuplicateHasOneWinner", func(t *testing.T) {
+		testOrderedIndexConcurrentDuplicateHasOneWinner(t, newBackend)
+	})
+	t.Run("TestOrderedIndexConcurrentDistinctCreatesAreMonotonic", func(t *testing.T) {
+		testOrderedIndexConcurrentDistinctCreatesAreMonotonic(t, newBackend)
+	})
+	t.Run("TestOrderedIndexOpaqueStableKeys", func(t *testing.T) {
+		testOrderedIndexOpaqueStableKeys(t, newBackend)
+	})
+	t.Run("TestOrderedIndexInvalidCursorFailsClosed", func(t *testing.T) {
+		testOrderedIndexInvalidCursorFailsClosed(t, newBackend)
+	})
+	t.Run("TestOrderedIndexLargeValueRoundTrip", func(t *testing.T) {
+		testOrderedIndexLargeValueRoundTrip(t, newBackend)
+	})
+	t.Run("TestOrderedIndexDeletePreventsReuse", func(t *testing.T) {
+		testOrderedIndexDeletePreventsReuse(t, newBackend)
+	})
+	if len(counters) == 1 && counters[0] != nil {
+		t.Run("TestOrderedIndexProviderCounters", func(t *testing.T) {
+			counters[0].Assert(t, orderedIndexContext(t), freshOrderedIndex(t, newBackend))
+		})
+	}
+}
+
+func testOrderedIndexCreateAssignsImmutableOrder(t *testing.T, newBackend OrderedIndexFactory) {
+	ctx := orderedIndexContext(t)
+	index := freshOrderedIndex(t, newBackend)
+	first := mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("acceptance", "first"), "workers", []byte("first"), storage.Rank{}, storage.Due{State: storage.NotDue})
+	second := mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("acceptance", "second"), "workers", []byte("second"), storage.Rank{}, storage.Due{State: storage.NotDue})
+	if first.Revision != 1 || second.Revision != 1 {
+		t.Errorf("created revisions = (%d, %d), want (1, 1)", first.Revision, second.Revision)
+	}
+	if first.Order != 1 || second.Order != 2 {
+		t.Errorf("created orders = (%d, %d), want (1, 2)", first.Order, second.Order)
+	}
+
+	updated, err := index.Update(ctx, first.ID, first.Revision, []byte("first-updated"), storage.Rank{Ranked: true, Value: 4}, storage.Due{State: storage.DueAt, UnixMillis: 4})
+	if err != nil {
+		t.Fatalf("Update(%s): %v", orderedIndexIDLabel(first.ID), err)
+	}
+	if updated.Order != first.Order || updated.ID != first.ID || updated.RankingScope != first.RankingScope {
+		t.Errorf("Update(%s) changed immutable fields: %s", orderedIndexIDLabel(first.ID), orderedIndexRecordSummary(updated))
+	}
+
+	otherScope := mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("other", "first"), "workers", []byte("other"), storage.Rank{}, storage.Due{State: storage.NotDue})
+	if otherScope.Order != 1 {
+		t.Errorf("other ordering scope first order = %d, want 1", otherScope.Order)
+	}
+}
+
+func testOrderedIndexDuplicateReturnsOriginal(t *testing.T, newBackend OrderedIndexFactory) {
+	ctx := orderedIndexContext(t)
+	index := freshOrderedIndex(t, newBackend)
+	id := orderedIndexID("acceptance", "duplicate")
+	input := []byte("original-value")
+	wantValue := append([]byte(nil), input...)
+	first := mustCreateOrderedIndexRecord(t, ctx, index, id, "workers", input, storage.Rank{Ranked: true, Value: 8}, storage.Due{State: storage.DueAt, UnixMillis: 80})
+
+	input[0] = 'X'
+	first.Value[0] = 'Y'
+	duplicate, created, err := index.Create(ctx, id, "Workers", make([]byte, storage.MaxOrderedValueBytes+1), storage.Rank{}, storage.Due{State: storage.NotDue, UnixMillis: 1})
+	if err != nil || created {
+		t.Fatalf("duplicate Create(%s) = created %v, err %v; want false, nil", orderedIndexIDLabel(id), created, err)
+	}
+	if duplicate.Revision != 1 || duplicate.Order != 1 || duplicate.Rank != (storage.Rank{Ranked: true, Value: 8}) || duplicate.Due != (storage.Due{State: storage.DueAt, UnixMillis: 80}) || !bytes.Equal(duplicate.Value, wantValue) {
+		t.Errorf("duplicate Create(%s) = %s, want original canonical record", orderedIndexIDLabel(id), orderedIndexRecordSummary(duplicate))
+	}
+	duplicate.Value[0] = 'Z'
+	got := mustGetOrderedIndexRecord(t, ctx, index, id)
+	if !bytes.Equal(got.Value, wantValue) {
+		t.Errorf("Get(%s).Value = %q, want original bytes after caller mutation", orderedIndexIDLabel(id), got.Value)
+	}
+
+	invalidID := storage.OrderedID{Namespace: "Sessions", OrderingScope: "acceptance", StableKey: "duplicate"}
+	_, created, err = index.Create(ctx, invalidID, "workers", []byte("value"), storage.Rank{}, storage.Due{State: storage.NotDue})
+	var invalidName *storage.InvalidNameError
+	if !errors.As(err, &invalidName) || created {
+		t.Errorf("Create(invalid ID) = created %v, err %T %v; want false, *InvalidNameError", created, err, err)
+	}
+	for _, method := range []struct {
+		name string
+		call func() error
+	}{
+		{name: "Get", call: func() error { _, err := index.Get(ctx, invalidID); return err }},
+		{name: "Update", call: func() error {
+			_, err := index.Update(ctx, invalidID, 1, make([]byte, storage.MaxOrderedValueBytes+1), storage.Rank{}, storage.Due{State: storage.NotDue, UnixMillis: 1})
+			return err
+		}},
+		{name: "Delete", call: func() error { _, err := index.Delete(ctx, invalidID, 1); return err }},
+	} {
+		err := method.call()
+		if !errors.As(err, &invalidName) {
+			t.Errorf("%s(invalid ID) = %T %v, want *InvalidNameError before lookup or candidate validation", method.name, err, err)
+		}
+	}
+
+	for number, test := range []struct {
+		name         string
+		rankingScope string
+		value        []byte
+		due          storage.Due
+		matches      func(error) bool
+		want         string
+	}{
+		{
+			name:         "invalid ranking scope",
+			rankingScope: "Workers",
+			value:        []byte("value"),
+			due:          storage.Due{State: storage.NotDue},
+			matches: func(err error) bool {
+				var target *storage.InvalidNameError
+				return errors.As(err, &target)
+			},
+			want: "*InvalidNameError",
+		},
+		{
+			name:         "oversized value",
+			rankingScope: "workers",
+			value:        make([]byte, storage.MaxOrderedValueBytes+1),
+			due:          storage.Due{State: storage.NotDue},
+			matches: func(err error) bool {
+				var target *storage.OrderedValueTooLargeError
+				return errors.As(err, &target)
+			},
+			want: "*OrderedValueTooLargeError",
+		},
+		{
+			name:         "noncanonical not due",
+			rankingScope: "workers",
+			value:        []byte("value"),
+			due:          storage.Due{State: storage.NotDue, UnixMillis: 1},
+			matches: func(err error) bool {
+				var target *storage.InvalidDueError
+				return errors.As(err, &target)
+			},
+			want: "*InvalidDueError",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidateID := orderedIndexID("acceptance", storage.StableKey(fmt.Sprintf("invalid-%d", number)))
+			_, created, err := index.Create(ctx, candidateID, test.rankingScope, test.value, storage.Rank{}, test.due)
+			if created || !test.matches(err) {
+				t.Errorf("Create(absent %s) = created %v, err %T %v; want false, %s", orderedIndexIDLabel(candidateID), created, err, err, test.want)
+			}
+			_, getErr := index.Get(ctx, candidateID)
+			var notFound *storage.OrderedRecordNotFoundError
+			if !errors.As(getErr, &notFound) {
+				t.Errorf("Get(%s) after rejected Create = %T %v, want *OrderedRecordNotFoundError", orderedIndexIDLabel(candidateID), getErr, getErr)
+			}
+		})
+	}
+}
+
+func testOrderedIndexScopesIdentity(t *testing.T, newBackend OrderedIndexFactory) {
+	ctx := orderedIndexContext(t)
+	index := freshOrderedIndex(t, newBackend)
+	first := mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("scope-a", "shared"), "workers", []byte("a"), storage.Rank{}, storage.Due{State: storage.NotDue})
+	second := mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("scope-b", "shared"), "workers", []byte("b"), storage.Rank{}, storage.Due{State: storage.NotDue})
+	thirdID := storage.OrderedID{Namespace: "other", OrderingScope: "scope-a", StableKey: "shared"}
+	third := mustCreateOrderedIndexRecord(t, ctx, index, thirdID, "workers", []byte("c"), storage.Rank{}, storage.Due{State: storage.NotDue})
+	if first.Order != 1 || second.Order != 1 || third.Order != 1 {
+		t.Errorf("independent identity-scope orders = (%d, %d, %d), want (1, 1, 1)", first.Order, second.Order, third.Order)
+	}
+	for _, want := range []storage.OrderedRecord{first, second, third} {
+		got := mustGetOrderedIndexRecord(t, ctx, index, want.ID)
+		if !bytes.Equal(got.Value, want.Value) {
+			t.Errorf("Get(%s).Value = %q, want %q", orderedIndexIDLabel(want.ID), got.Value, want.Value)
+		}
+	}
+}
+
+func testOrderedIndexCASUpdateChangesValueRankAndDueAtomically(t *testing.T, newBackend OrderedIndexFactory) {
+	ctx := orderedIndexContext(t)
+	index := freshOrderedIndex(t, newBackend)
+	id := orderedIndexID("acceptance", "atomic")
+	created := mustCreateOrderedIndexRecord(t, ctx, index, id, "workers", []byte("before"), storage.Rank{Ranked: true, Value: 1}, storage.Due{State: storage.DueAt, UnixMillis: 10})
+	wantValue := []byte("after")
+	wantRank := storage.Rank{Ranked: true, Value: 99}
+	wantDue := storage.Due{State: storage.DueAt, UnixMillis: -5}
+	updated, err := index.Update(ctx, id, created.Revision, wantValue, wantRank, wantDue)
+	if err != nil {
+		t.Fatalf("Update(%s): %v", orderedIndexIDLabel(id), err)
+	}
+	if updated.Revision != created.Revision+1 || updated.Order != created.Order || updated.ID != created.ID || updated.RankingScope != created.RankingScope || updated.Rank != wantRank || updated.Due != wantDue || !bytes.Equal(updated.Value, wantValue) {
+		t.Errorf("Update(%s) = %s, want one atomic revision/value/rank/due change", orderedIndexIDLabel(id), orderedIndexRecordSummary(updated))
+	}
+	got := mustGetOrderedIndexRecord(t, ctx, index, id)
+	requireOrderedIndexRecordEqual(t, "Get after atomic Update", got, updated)
+
+	tooLarge := make([]byte, storage.MaxOrderedValueBytes+1)
+	_, err = index.Update(ctx, id, created.Revision, tooLarge, storage.Rank{}, storage.Due{State: storage.NotDue})
+	var tooLargeErr *storage.OrderedValueTooLargeError
+	if !errors.As(err, &tooLargeErr) {
+		t.Errorf("Update(%s, stale+invalid candidate) = %T %v, want *OrderedValueTooLargeError before revision conflict", orderedIndexIDLabel(id), err, err)
+	}
+	requireOrderedIndexRecordEqual(t, "Get after rejected stale+invalid Update", mustGetOrderedIndexRecord(t, ctx, index, id), updated)
+
+	updated.Value[0] = 'X'
+	if got = mustGetOrderedIndexRecord(t, ctx, index, id); !bytes.Equal(got.Value, wantValue) {
+		t.Errorf("returned Update value aliases stored bytes for %s", orderedIndexIDLabel(id))
+	}
+}
+
+func testOrderedIndexWrongRevisionLeavesStateUntouched(t *testing.T, newBackend OrderedIndexFactory) {
+	ctx := orderedIndexContext(t)
+	index := freshOrderedIndex(t, newBackend)
+	id := orderedIndexID("acceptance", "revision")
+	created := mustCreateOrderedIndexRecord(t, ctx, index, id, "workers", []byte("before"), storage.Rank{Ranked: true, Value: 7}, storage.Due{State: storage.DueAt, UnixMillis: 7})
+
+	_, err := index.Update(ctx, id, created.Revision+1, []byte("after"), storage.Rank{Ranked: true, Value: 8}, storage.Due{State: storage.DueAt, UnixMillis: 8})
+	var conflict *storage.OrderedRevisionConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("Update(%s, stale revision) = %T %v, want *OrderedRevisionConflictError", orderedIndexIDLabel(id), err, err)
+	}
+	if conflict.ID != id || conflict.ExpectedRevision != created.Revision+1 || conflict.ActualRevision != created.Revision {
+		t.Errorf("Update(%s, stale revision) conflict = %#v, want ID and expected/actual revisions", orderedIndexIDLabel(id), conflict)
+	}
+	requireOrderedIndexRecordEqual(t, "Get after stale Update", mustGetOrderedIndexRecord(t, ctx, index, id), created)
+
+	_, err = index.Delete(ctx, id, created.Revision+1)
+	if !errors.As(err, &conflict) {
+		t.Fatalf("Delete(%s, stale revision) = %T %v, want *OrderedRevisionConflictError", orderedIndexIDLabel(id), err, err)
+	}
+	requireOrderedIndexRecordEqual(t, "Get after stale Delete", mustGetOrderedIndexRecord(t, ctx, index, id), created)
+
+	absent := orderedIndexID("acceptance", "absent")
+	_, err = index.Update(ctx, absent, 99, make([]byte, storage.MaxOrderedValueBytes+1), storage.Rank{}, storage.Due{State: storage.NotDue, UnixMillis: 1})
+	var notFound *storage.OrderedRecordNotFoundError
+	if !errors.As(err, &notFound) || notFound.ID != absent {
+		t.Errorf("Update(absent %s) = %T %v, want *OrderedRecordNotFoundError before candidate validation", orderedIndexIDLabel(absent), err, err)
+	}
+	_, err = index.Delete(ctx, absent, 99)
+	if !errors.As(err, &notFound) || notFound.ID != absent {
+		t.Errorf("Delete(absent %s) = %T %v, want *OrderedRecordNotFoundError", orderedIndexIDLabel(absent), err, err)
+	}
+}
+
+func testOrderedIndexListOrderedPagesInAcceptanceOrder(t *testing.T, newBackend OrderedIndexFactory) {
+	ctx := orderedIndexContext(t)
+	index := freshOrderedIndex(t, newBackend)
+	ids := []storage.OrderedID{
+		orderedIndexID("acceptance", "first"),
+		orderedIndexID("acceptance", "second"),
+		orderedIndexID("acceptance", "third"),
+		orderedIndexID("acceptance", "fourth"),
+		orderedIndexID("acceptance", "fifth"),
+	}
+	for _, id := range ids {
+		mustCreateOrderedIndexRecord(t, ctx, index, id, "workers", []byte(id.StableKey), storage.Rank{}, storage.Due{State: storage.NotDue})
+	}
+	middle := mustGetOrderedIndexRecord(t, ctx, index, ids[2])
+	if _, err := index.Delete(ctx, middle.ID, middle.Revision); err != nil {
+		t.Fatalf("Delete(%s): %v", orderedIndexIDLabel(middle.ID), err)
+	}
+
+	var all []storage.OrderedRecord
+	after := uint64(0)
+	for pageNumber := 0; pageNumber < 4; pageNumber++ {
+		page, err := index.ListOrdered(ctx, "sessions", "acceptance", after, 2)
+		if err != nil {
+			t.Fatalf("ListOrdered(after=%d): %v", after, err)
+		}
+		if len(page.Records) == 0 {
+			if page.NextAfterOrder != 0 {
+				t.Errorf("empty ListOrdered page next order = %d, want 0", page.NextAfterOrder)
+			}
+			break
+		}
+		if page.NextAfterOrder != page.Records[len(page.Records)-1].Order {
+			t.Errorf("ListOrdered(after=%d) next order = %d, want final page order %d", after, page.NextAfterOrder, page.Records[len(page.Records)-1].Order)
+		}
+		for _, record := range page.Records {
+			if record.Order <= after {
+				t.Errorf("ListOrdered(after=%d) returned nonexclusive order %d for %s", after, record.Order, orderedIndexIDLabel(record.ID))
+			}
+		}
+		all = append(all, page.Records...)
+		after = page.NextAfterOrder
+	}
+	if len(all) != len(ids) {
+		t.Fatalf("ListOrdered all pages returned %d records, want %d", len(all), len(ids))
+	}
+	if got, want := orderedIndexRecordLabels(all), []string{"acceptance/first", "acceptance/second", "acceptance/third", "acceptance/fourth", "acceptance/fifth"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("ListOrdered labels = %v, want %v", got, want)
+	}
+	for i, record := range all {
+		if record.Order != uint64(i+1) {
+			t.Errorf("ListOrdered record %s order = %d, want %d", orderedIndexIDLabel(record.ID), record.Order, i+1)
+		}
+	}
+	if !all[2].Deleted {
+		t.Errorf("ListOrdered terminal record %s omitted its tombstone state", orderedIndexIDLabel(all[2].ID))
+	}
+}
+
+func testOrderedIndexListRankedPagesByRankAndStableKey(t *testing.T, newBackend OrderedIndexFactory) {
+	ctx := orderedIndexContext(t)
+	index := freshOrderedIndex(t, newBackend)
+	mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("acceptance", "high"), "workers", []byte("high"), storage.Rank{Ranked: true, Value: 20}, storage.Due{State: storage.NotDue})
+	mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("acceptance", "zeta"), "workers", []byte("zeta"), storage.Rank{Ranked: true, Value: 10}, storage.Due{State: storage.NotDue})
+	mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("a", "same"), "workers", []byte("tie-a"), storage.Rank{Ranked: true, Value: 10}, storage.Due{State: storage.NotDue})
+	mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("b", "same"), "workers", []byte("tie-b"), storage.Rank{Ranked: true, Value: 10}, storage.Due{State: storage.NotDue})
+	mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("acceptance", "alpha"), "workers", []byte("alpha"), storage.Rank{Ranked: true, Value: 10}, storage.Due{State: storage.NotDue})
+	mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("c", "low"), "workers", []byte("low"), storage.Rank{Ranked: true, Value: 1}, storage.Due{State: storage.NotDue})
+	mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("acceptance", "unranked"), "workers", []byte("unranked"), storage.Rank{}, storage.Due{State: storage.NotDue})
+
+	first, err := index.ListRanked(ctx, "sessions", "workers", "", 3)
+	if err != nil {
+		t.Fatalf("ListRanked(first page): %v", err)
+	}
+	if got, want := orderedIndexRecordLabels(first.Records), []string{"acceptance/high", "acceptance/zeta", "b/same"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("ListRanked(first page) = %v, want %v", got, want)
+	}
+	if first.NextCursor == "" {
+		t.Fatal("ListRanked(first page) returned an empty cursor before exhaustion")
+	}
+	second, err := index.ListRanked(ctx, "sessions", "workers", first.NextCursor, 3)
+	if err != nil {
+		t.Fatalf("ListRanked(second page): %v", err)
+	}
+	if got, want := orderedIndexRecordLabels(second.Records), []string{"a/same", "acceptance/alpha", "c/low"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("ListRanked(second page) = %v, want %v", got, want)
+	}
+	if second.NextCursor != "" {
+		t.Errorf("ListRanked(final page) next cursor = %q, want empty", second.NextCursor)
+	}
+}
+
+func testOrderedIndexRankMoveUpdatesAuthoritativePage(t *testing.T, newBackend OrderedIndexFactory) {
+	ctx := orderedIndexContext(t)
+	index := freshOrderedIndex(t, newBackend)
+	high := mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("acceptance", "high"), "workers", []byte("high"), storage.Rank{Ranked: true, Value: 20}, storage.Due{State: storage.NotDue})
+	low := mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("acceptance", "low"), "workers", []byte("low"), storage.Rank{Ranked: true, Value: 1}, storage.Due{State: storage.NotDue})
+
+	moved, err := index.Update(ctx, low.ID, low.Revision, []byte("low-moved"), storage.Rank{Ranked: true, Value: 30}, storage.Due{State: storage.NotDue})
+	if err != nil {
+		t.Fatalf("Update(rank move %s): %v", orderedIndexIDLabel(low.ID), err)
+	}
+	page, err := index.ListRanked(ctx, "sessions", "workers", "", 10)
+	if err != nil {
+		t.Fatalf("ListRanked(after move): %v", err)
+	}
+	if got, want := orderedIndexRecordLabels(page.Records), []string{"acceptance/low", "acceptance/high"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("ListRanked(after move) = %v, want %v", got, want)
+	}
+	if len(page.Records) != 2 || page.Records[0].Revision != moved.Revision || !bytes.Equal(page.Records[0].Value, []byte("low-moved")) || page.Records[1].ID != high.ID {
+		t.Errorf("ListRanked(after move) did not use current authoritative records: %v", orderedIndexRecordSummaries(page.Records))
+	}
+}
+
+func testOrderedIndexListDuePagesByDeadlineAndStableKey(t *testing.T, newBackend OrderedIndexFactory) {
+	ctx := orderedIndexContext(t)
+	index := freshOrderedIndex(t, newBackend)
+	mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("acceptance", "past"), "workers", []byte("past"), storage.Rank{}, storage.Due{State: storage.DueAt, UnixMillis: 5})
+	mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("acceptance", "alpha"), "workers", []byte("alpha"), storage.Rank{}, storage.Due{State: storage.DueAt, UnixMillis: 10})
+	mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("b", "same"), "workers", []byte("tie-b"), storage.Rank{}, storage.Due{State: storage.DueAt, UnixMillis: 10})
+	mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("a", "same"), "workers", []byte("tie-a"), storage.Rank{}, storage.Due{State: storage.DueAt, UnixMillis: 10})
+	mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("acceptance", "zeta"), "workers", []byte("zeta"), storage.Rank{}, storage.Due{State: storage.DueAt, UnixMillis: 10})
+	later := mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("acceptance", "later"), "workers", []byte("later"), storage.Rank{}, storage.Due{State: storage.DueAt, UnixMillis: 20})
+	mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("acceptance", "not-due"), "workers", []byte("not-due"), storage.Rank{}, storage.Due{State: storage.NotDue})
+
+	first, err := index.ListDue(ctx, "sessions", 10, "", 2)
+	if err != nil {
+		t.Fatalf("ListDue(first page): %v", err)
+	}
+	if got, want := orderedIndexRecordLabels(first.Records), []string{"acceptance/past", "acceptance/alpha"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("ListDue(first page) = %v, want %v", got, want)
+	}
+	if first.NextCursor == "" {
+		t.Fatal("ListDue(first page) returned an empty cursor before exhaustion")
+	}
+	second, err := index.ListDue(ctx, "sessions", 10, first.NextCursor, 2)
+	if err != nil {
+		t.Fatalf("ListDue(second page): %v", err)
+	}
+	if got, want := orderedIndexRecordLabels(second.Records), []string{"a/same", "b/same"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("ListDue(second page) = %v, want %v", got, want)
+	}
+	if second.NextCursor == "" {
+		t.Fatal("ListDue(second page) returned an empty cursor before zeta")
+	}
+	third, err := index.ListDue(ctx, "sessions", 10, second.NextCursor, 2)
+	if err != nil {
+		t.Fatalf("ListDue(third page): %v", err)
+	}
+	if got, want := orderedIndexRecordLabels(third.Records), []string{"acceptance/zeta"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("ListDue(third page) = %v, want %v", got, want)
+	}
+	if third.NextCursor != "" {
+		t.Errorf("ListDue(final page) next cursor = %q, want empty", third.NextCursor)
+	}
+
+	moved, err := index.Update(ctx, later.ID, later.Revision, []byte("later-moved"), storage.Rank{}, storage.Due{State: storage.DueAt, UnixMillis: 1})
+	if err != nil {
+		t.Fatalf("Update(due move %s): %v", orderedIndexIDLabel(later.ID), err)
+	}
+	afterMove, err := index.ListDue(ctx, "sessions", 100, "", 10)
+	if err != nil {
+		t.Fatalf("ListDue(after due move): %v", err)
+	}
+	if got, want := orderedIndexRecordLabels(afterMove.Records), []string{"acceptance/later", "acceptance/past", "acceptance/alpha", "a/same", "b/same", "acceptance/zeta"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("ListDue(after due move) = %v, want %v", got, want)
+	}
+	if len(afterMove.Records) == 0 || afterMove.Records[0].Revision != moved.Revision || !bytes.Equal(afterMove.Records[0].Value, []byte("later-moved")) {
+		t.Errorf("ListDue(after due move) did not return the moved current record: %v", orderedIndexRecordSummaries(afterMove.Records))
+	}
+}
+
+func testOrderedIndexNotDueNeverAppearsInDuePages(t *testing.T, newBackend OrderedIndexFactory) {
+	ctx := orderedIndexContext(t)
+	index := freshOrderedIndex(t, newBackend)
+	due := mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("acceptance", "due"), "workers", []byte("due"), storage.Rank{}, storage.Due{State: storage.DueAt, UnixMillis: 1})
+	mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("acceptance", "never-due"), "workers", []byte("never"), storage.Rank{}, storage.Due{State: storage.NotDue})
+
+	updated, err := index.Update(ctx, due.ID, due.Revision, []byte("not-due"), storage.Rank{}, storage.Due{State: storage.NotDue})
+	if err != nil {
+		t.Fatalf("Update(not due %s): %v", orderedIndexIDLabel(due.ID), err)
+	}
+	if updated.Due != (storage.Due{State: storage.NotDue}) {
+		t.Errorf("Update(not due %s).Due = %#v, want canonical NotDue", orderedIndexIDLabel(due.ID), updated.Due)
+	}
+	page, err := index.ListDue(ctx, "sessions", 100, "", 10)
+	if err != nil {
+		t.Fatalf("ListDue(after not-due move): %v", err)
+	}
+	if len(page.Records) != 0 || page.NextCursor != "" {
+		t.Errorf("ListDue(after not-due move) = %#v, want empty page", page)
+	}
+}
+
+func testOrderedIndexTerminalRecordsDoNotFillPages(t *testing.T, newBackend OrderedIndexFactory) {
+	ctx := orderedIndexContext(t)
+	index := freshOrderedIndex(t, newBackend)
+	tombstoned := mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("acceptance", "tombstone"), "workers", []byte("terminal"), storage.Rank{Ranked: true, Value: 100}, storage.Due{State: storage.DueAt, UnixMillis: 1})
+	firstLive := mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("acceptance", "first-live"), "workers", []byte("first"), storage.Rank{Ranked: true, Value: 20}, storage.Due{State: storage.DueAt, UnixMillis: 2})
+	mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("acceptance", "second-live"), "workers", []byte("second"), storage.Rank{Ranked: true, Value: 10}, storage.Due{State: storage.DueAt, UnixMillis: 3})
+
+	deleted, err := index.Delete(ctx, tombstoned.ID, tombstoned.Revision)
+	if err != nil {
+		t.Fatalf("Delete(%s): %v", orderedIndexIDLabel(tombstoned.ID), err)
+	}
+	if !deleted.Deleted || deleted.Rank != (storage.Rank{}) || deleted.Due != (storage.Due{State: storage.NotDue}) || !bytes.Equal(deleted.Value, tombstoned.Value) {
+		t.Errorf("Delete(%s) = %s, want canonical terminal record", orderedIndexIDLabel(tombstoned.ID), orderedIndexRecordSummary(deleted))
+	}
+	retry, err := index.Delete(ctx, tombstoned.ID, tombstoned.Revision)
+	if err != nil {
+		t.Fatalf("Delete retry(%s): %v", orderedIndexIDLabel(tombstoned.ID), err)
+	}
+	requireOrderedIndexRecordEqual(t, "Delete retry", retry, deleted)
+	_, err = index.Update(ctx, tombstoned.ID, 0, make([]byte, storage.MaxOrderedValueBytes+1), storage.Rank{}, storage.Due{State: storage.NotDue, UnixMillis: 1})
+	var deletedErr *storage.OrderedDeletedError
+	if !errors.As(err, &deletedErr) || deletedErr.ID != tombstoned.ID {
+		t.Errorf("Update(tombstone %s) = %T %v, want *OrderedDeletedError before candidate validation", orderedIndexIDLabel(tombstoned.ID), err, err)
+	}
+
+	ranked, err := index.ListRanked(ctx, "sessions", "workers", "", 1)
+	if err != nil {
+		t.Fatalf("ListRanked(after Delete): %v", err)
+	}
+	if got, want := orderedIndexRecordLabels(ranked.Records), []string{"acceptance/first-live"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("ListRanked(after Delete, limit 1) = %v, want %v", got, want)
+	}
+	due, err := index.ListDue(ctx, "sessions", 10, "", 1)
+	if err != nil {
+		t.Fatalf("ListDue(after Delete): %v", err)
+	}
+	if got, want := orderedIndexRecordLabels(due.Records), []string{"acceptance/first-live"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("ListDue(after Delete, limit 1) = %v, want %v", got, want)
+	}
+	if len(ranked.Records) == 1 && ranked.Records[0].ID != firstLive.ID {
+		t.Errorf("ListRanked(after Delete) returned %s, want %s", orderedIndexIDLabel(ranked.Records[0].ID), orderedIndexIDLabel(firstLive.ID))
+	}
+}
+
+func testOrderedIndexConcurrentDuplicateHasOneWinner(t *testing.T, newBackend OrderedIndexFactory) {
+	ctx := orderedIndexContext(t)
+	index := freshOrderedIndex(t, newBackend)
+	const writers = 100
+	id := orderedIndexID("acceptance", "contended")
+	type result struct {
+		record  storage.OrderedRecord
+		created bool
+		err     error
+	}
+	results := make(chan result, writers)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			record, created, err := index.Create(ctx, id, "workers", []byte(fmt.Sprintf("writer-%03d", i)), storage.Rank{}, storage.Due{State: storage.NotDue})
+			results <- result{record: record, created: created, err: err}
+		}(i)
+	}
+	close(start)
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatalf("concurrent duplicate creates did not finish before deadline: %v", ctx.Err())
+	}
+	close(results)
+
+	var canonical storage.OrderedRecord
+	winners := 0
+	allResults := make([]result, 0, writers)
+	for result := range results {
+		if result.err != nil {
+			t.Errorf("concurrent Create(%s) error: %v", orderedIndexIDLabel(id), result.err)
+			continue
+		}
+		allResults = append(allResults, result)
+		if result.created {
+			winners++
+			canonical = result.record
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("concurrent duplicate Create(%s) winners = %d, want 1", orderedIndexIDLabel(id), winners)
+	}
+	if canonical.Order != 1 || canonical.Revision != 1 {
+		t.Errorf("concurrent duplicate winner %s has order/revision (%d, %d), want (1, 1)", orderedIndexIDLabel(id), canonical.Order, canonical.Revision)
+	}
+	for _, result := range allResults {
+		requireOrderedIndexRecordEqual(t, "concurrent duplicate canonical result", result.record, canonical)
+	}
+}
+
+func testOrderedIndexConcurrentDistinctCreatesAreMonotonic(t *testing.T, newBackend OrderedIndexFactory) {
+	ctx := orderedIndexContext(t)
+	index := freshOrderedIndex(t, newBackend)
+	const writers = 100
+	type result struct {
+		record  storage.OrderedRecord
+		created bool
+		err     error
+	}
+	results := make(chan result, writers)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			id := orderedIndexID("acceptance", storage.StableKey(fmt.Sprintf("key-%03d", i)))
+			record, created, err := index.Create(ctx, id, "workers", []byte("value"), storage.Rank{}, storage.Due{State: storage.NotDue})
+			results <- result{record: record, created: created, err: err}
+		}(i)
+	}
+	close(start)
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatalf("concurrent distinct creates did not finish before deadline: %v", ctx.Err())
+	}
+	close(results)
+
+	orders := make([]uint64, 0, writers)
+	for result := range results {
+		if result.err != nil || !result.created {
+			t.Errorf("concurrent distinct Create(%s) = created %v, err %v; want true, nil", orderedIndexIDLabel(result.record.ID), result.created, result.err)
+			continue
+		}
+		orders = append(orders, result.record.Order)
+	}
+	if len(orders) != writers {
+		t.Fatalf("concurrent distinct creates completed %d records, want %d", len(orders), writers)
+	}
+	sort.Slice(orders, func(i int, j int) bool { return orders[i] < orders[j] })
+	for i, order := range orders {
+		if want := uint64(i + 1); order != want {
+			t.Errorf("concurrent distinct order[%d] = %d, want %d", i, order, want)
+		}
+	}
+}
+
+func testOrderedIndexOpaqueStableKeys(t *testing.T, newBackend OrderedIndexFactory) {
+	ctx := orderedIndexContext(t)
+	index := freshOrderedIndex(t, newBackend)
+	keys := []storage.StableKey{
+		"v1:ABC_def-09",
+		"slash/value",
+		"UPPERCASE",
+		"snowman-☃/世界",
+		storage.StableKey(strings.Repeat("k", storage.MaxStableKeyBytes)),
+	}
+	for _, key := range keys {
+		id := orderedIndexID("opaque", key)
+		created := mustCreateOrderedIndexRecord(t, ctx, index, id, "workers", []byte("value:"+string(key)), storage.Rank{}, storage.Due{State: storage.NotDue})
+		got := mustGetOrderedIndexRecord(t, ctx, index, id)
+		requireOrderedIndexRecordEqual(t, "opaque stable key round trip", got, created)
+	}
+	page, err := index.ListOrdered(ctx, "sessions", "opaque", 0, len(keys))
+	if err != nil {
+		t.Fatalf("ListOrdered(opaque stable keys): %v", err)
+	}
+	gotKeys := make([]storage.StableKey, len(page.Records))
+	for i, record := range page.Records {
+		gotKeys[i] = record.ID.StableKey
+	}
+	if !reflect.DeepEqual(gotKeys, keys) {
+		t.Errorf("ListOrdered(opaque stable keys) = %q, want creation-order keys %q", gotKeys, keys)
+	}
+	for _, key := range []storage.StableKey{"", storage.StableKey(strings.Repeat("k", storage.MaxStableKeyBytes+1)), storage.StableKey(string([]byte{0xff}))} {
+		id := orderedIndexID("opaque", key)
+		_, created, err := index.Create(ctx, id, "workers", []byte("value"), storage.Rank{}, storage.Due{State: storage.NotDue})
+		var invalid *storage.InvalidStableKeyError
+		if !errors.As(err, &invalid) || created {
+			t.Errorf("Create(invalid stable key length %d) = created %v, err %T %v; want false, *InvalidStableKeyError", len(key), created, err, err)
+		}
+	}
+}
+
+func testOrderedIndexInvalidCursorFailsClosed(t *testing.T, newBackend OrderedIndexFactory) {
+	ctx := orderedIndexContext(t)
+	index := freshOrderedIndex(t, newBackend)
+	for _, key := range []storage.StableKey{"first", "second", "third"} {
+		mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("acceptance", key), "workers", []byte(key), storage.Rank{Ranked: true, Value: 1}, storage.Due{State: storage.DueAt, UnixMillis: 1})
+	}
+
+	ranked, err := index.ListRanked(ctx, "sessions", "workers", "", 1)
+	if err != nil || ranked.NextCursor == "" {
+		t.Fatalf("ListRanked(first page) = %d records, continuation %v, err %v; want continuation cursor", len(ranked.Records), ranked.NextCursor != "", err)
+	}
+	requireInvalidOrderedCursor(t, func() (int, bool, error) {
+		page, err := index.ListRanked(ctx, "sessions", "other", ranked.NextCursor, 1)
+		return len(page.Records), page.NextCursor != "", err
+	}, storage.RankedCursorKind, storage.OrderedCursorQueryMismatch, string(ranked.NextCursor))
+	requireInvalidOrderedCursor(t, func() (int, bool, error) {
+		page, err := index.ListRanked(ctx, "other", "workers", ranked.NextCursor, 1)
+		return len(page.Records), page.NextCursor != "", err
+	}, storage.RankedCursorKind, storage.OrderedCursorQueryMismatch, string(ranked.NextCursor))
+	requireInvalidOrderedCursor(t, func() (int, bool, error) {
+		page, err := index.ListRanked(ctx, "sessions", "workers", storage.RankedCursor("ranked-token-secret"), 1)
+		return len(page.Records), page.NextCursor != "", err
+	}, storage.RankedCursorKind, storage.OrderedCursorMalformed, "ranked-token-secret")
+	requireInvalidOrderedCursor(t, func() (int, bool, error) {
+		page, err := index.ListRanked(ctx, "sessions", "workers", storage.RankedCursor("v2:r:opaque"), 1)
+		return len(page.Records), page.NextCursor != "", err
+	}, storage.RankedCursorKind, storage.OrderedCursorUnknownVersion, "v2:r:opaque")
+
+	due, err := index.ListDue(ctx, "sessions", 1, "", 1)
+	if err != nil || due.NextCursor == "" {
+		t.Fatalf("ListDue(first page) = %d records, continuation %v, err %v; want continuation cursor", len(due.Records), due.NextCursor != "", err)
+	}
+	requireInvalidOrderedCursor(t, func() (int, bool, error) {
+		page, err := index.ListDue(ctx, "sessions", 2, due.NextCursor, 1)
+		return len(page.Records), page.NextCursor != "", err
+	}, storage.DueCursorKind, storage.OrderedCursorQueryMismatch, string(due.NextCursor))
+	requireInvalidOrderedCursor(t, func() (int, bool, error) {
+		page, err := index.ListDue(ctx, "other", 1, due.NextCursor, 1)
+		return len(page.Records), page.NextCursor != "", err
+	}, storage.DueCursorKind, storage.OrderedCursorQueryMismatch, string(due.NextCursor))
+	requireInvalidOrderedCursor(t, func() (int, bool, error) {
+		page, err := index.ListDue(ctx, "sessions", 1, storage.DueCursor("due-token-secret"), 1)
+		return len(page.Records), page.NextCursor != "", err
+	}, storage.DueCursorKind, storage.OrderedCursorMalformed, "due-token-secret")
+	requireInvalidOrderedCursor(t, func() (int, bool, error) {
+		page, err := index.ListDue(ctx, "sessions", 1, storage.DueCursor("v2:d:opaque"), 1)
+		return len(page.Records), page.NextCursor != "", err
+	}, storage.DueCursorKind, storage.OrderedCursorUnknownVersion, "v2:d:opaque")
+	requireInvalidOrderedCursor(t, func() (int, bool, error) {
+		page, err := index.ListRanked(ctx, "sessions", "workers", storage.RankedCursor(due.NextCursor), 1)
+		return len(page.Records), page.NextCursor != "", err
+	}, storage.RankedCursorKind, storage.OrderedCursorWrongKind, string(due.NextCursor))
+	requireInvalidOrderedCursor(t, func() (int, bool, error) {
+		page, err := index.ListDue(ctx, "sessions", 1, storage.DueCursor(ranked.NextCursor), 1)
+		return len(page.Records), page.NextCursor != "", err
+	}, storage.DueCursorKind, storage.OrderedCursorWrongKind, string(ranked.NextCursor))
+}
+
+func testOrderedIndexLargeValueRoundTrip(t *testing.T, newBackend OrderedIndexFactory) {
+	ctx := orderedIndexContext(t)
+	index := freshOrderedIndex(t, newBackend)
+	id := orderedIndexID("acceptance", "large")
+	input := patternedBytes(storage.MaxOrderedValueBytes)
+	want := append([]byte(nil), input...)
+	created := mustCreateOrderedIndexRecord(t, ctx, index, id, "workers", input, storage.Rank{Ranked: true, Value: 1}, storage.Due{State: storage.DueAt, UnixMillis: 1})
+	input[0] ^= 0xff
+	created.Value[1] ^= 0xff
+	if got := mustGetOrderedIndexRecord(t, ctx, index, id); !bytes.Equal(got.Value, want) {
+		t.Errorf("Get(%s) did not preserve a 1 MiB caller-owned value", orderedIndexIDLabel(id))
+	}
+
+	ordered, err := index.ListOrdered(ctx, "sessions", "acceptance", 0, 1)
+	if err != nil || len(ordered.Records) != 1 {
+		t.Fatalf("ListOrdered(large) = %d records, next order %d, err %v; want one record, nil", len(ordered.Records), ordered.NextAfterOrder, err)
+	}
+	ranked, err := index.ListRanked(ctx, "sessions", "workers", "", 1)
+	if err != nil || len(ranked.Records) != 1 {
+		t.Fatalf("ListRanked(large) = %d records, continuation %v, err %v; want one record, nil", len(ranked.Records), ranked.NextCursor != "", err)
+	}
+	due, err := index.ListDue(ctx, "sessions", 1, "", 1)
+	if err != nil || len(due.Records) != 1 {
+		t.Fatalf("ListDue(large) = %d records, continuation %v, err %v; want one record, nil", len(due.Records), due.NextCursor != "", err)
+	}
+	ordered.Records[0].Value[2] ^= 0xff
+	ranked.Records[0].Value[3] ^= 0xff
+	due.Records[0].Value[4] ^= 0xff
+	if got := mustGetOrderedIndexRecord(t, ctx, index, id); !bytes.Equal(got.Value, want) {
+		t.Errorf("listing snapshots alias stored 1 MiB value for %s", orderedIndexIDLabel(id))
+	}
+}
+
+func testOrderedIndexDeletePreventsReuse(t *testing.T, newBackend OrderedIndexFactory) {
+	ctx := orderedIndexContext(t)
+	index := freshOrderedIndex(t, newBackend)
+	id := orderedIndexID("acceptance", "terminal")
+	created := mustCreateOrderedIndexRecord(t, ctx, index, id, "workers", []byte("original"), storage.Rank{}, storage.Due{State: storage.NotDue})
+	deleted, err := index.Delete(ctx, id, created.Revision)
+	if err != nil {
+		t.Fatalf("Delete(%s): %v", orderedIndexIDLabel(id), err)
+	}
+	duplicate, createdAgain, err := index.Create(ctx, id, "Workers", make([]byte, storage.MaxOrderedValueBytes+1), storage.Rank{}, storage.Due{State: storage.NotDue, UnixMillis: 1})
+	if err != nil || createdAgain {
+		t.Fatalf("Create(tombstone %s) = created %v, err %v; want false, nil", orderedIndexIDLabel(id), createdAgain, err)
+	}
+	requireOrderedIndexRecordEqual(t, "Create tombstone retry", duplicate, deleted)
+	requireOrderedIndexRecordEqual(t, "Get tombstone", mustGetOrderedIndexRecord(t, ctx, index, id), deleted)
+
+	next := mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("acceptance", "next"), "workers", []byte("next"), storage.Rank{}, storage.Due{State: storage.NotDue})
+	if next.Order != created.Order+1 {
+		t.Errorf("Create(after tombstone) order = %d, want %d without reuse", next.Order, created.Order+1)
+	}
+}
+
+func orderedIndexContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), conformanceTimeout)
+	t.Cleanup(cancel)
+	return ctx
+}
+
+func freshOrderedIndex(t *testing.T, newBackend OrderedIndexFactory) storage.OrderedIndex {
+	t.Helper()
+	index := newBackend(t)
+	if index == nil {
+		t.Fatal("ordered index factory returned nil")
+	}
+	return index
+}
+
+func orderedIndexID(orderingScope string, stableKey storage.StableKey) storage.OrderedID {
+	return storage.OrderedID{Namespace: "sessions", OrderingScope: orderingScope, StableKey: stableKey}
+}
+
+func mustCreateOrderedIndexRecord(t *testing.T, ctx context.Context, index storage.OrderedIndex, id storage.OrderedID, rankingScope string, value []byte, rank storage.Rank, due storage.Due) storage.OrderedRecord {
+	t.Helper()
+	record, created, err := index.Create(ctx, id, rankingScope, value, rank, due)
+	if err != nil || !created {
+		t.Fatalf("Create(%s) = %s, created %v, err %v; want record, true, nil", orderedIndexIDLabel(id), orderedIndexRecordSummary(record), created, err)
+	}
+	return record
+}
+
+func mustGetOrderedIndexRecord(t *testing.T, ctx context.Context, index storage.OrderedIndex, id storage.OrderedID) storage.OrderedRecord {
+	t.Helper()
+	record, err := index.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", orderedIndexIDLabel(id), err)
+	}
+	return record
+}
+
+func requireOrderedIndexRecordEqual(t *testing.T, label string, got storage.OrderedRecord, want storage.OrderedRecord) {
+	t.Helper()
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("%s record %s differs from canonical record %s", label, orderedIndexIDLabel(got.ID), orderedIndexIDLabel(want.ID))
+	}
+}
+
+func orderedIndexRecordLabels(records []storage.OrderedRecord) []string {
+	labels := make([]string, len(records))
+	for i, record := range records {
+		labels[i] = record.ID.OrderingScope + "/" + string(record.ID.StableKey)
+	}
+	return labels
+}
+
+func orderedIndexRecordSummaries(records []storage.OrderedRecord) []string {
+	summaries := make([]string, len(records))
+	for i, record := range records {
+		summaries[i] = orderedIndexRecordSummary(record)
+	}
+	return summaries
+}
+
+func orderedIndexRecordSummary(record storage.OrderedRecord) string {
+	return fmt.Sprintf("%s rev=%d order=%d rank=%t/%d due=%d/%d deleted=%t valueBytes=%d", orderedIndexIDLabel(record.ID), record.Revision, record.Order, record.Rank.Ranked, record.Rank.Value, record.Due.State, record.Due.UnixMillis, record.Deleted, len(record.Value))
+}
+
+func orderedIndexIDLabel(id storage.OrderedID) string {
+	return id.Namespace + "/" + id.OrderingScope + "/" + string(id.StableKey)
+}
+
+func requireInvalidOrderedCursor(t *testing.T, call func() (records int, hasNext bool, err error), kind storage.OrderedCursorKind, rule storage.OrderedCursorRule, raw string) {
+	t.Helper()
+	records, hasNext, err := call()
+	var invalid *storage.InvalidOrderedCursorError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("cursor error = %T %v, want *InvalidOrderedCursorError", err, err)
+	}
+	if invalid.Kind != kind || invalid.Rule != rule {
+		t.Errorf("cursor error = %#v, want kind %q rule %q", invalid, kind, rule)
+	}
+	if strings.Contains(err.Error(), raw) {
+		t.Errorf("cursor error %q leaked opaque token %q", err, raw)
+	}
+	if records != 0 || hasNext {
+		t.Errorf("invalid cursor returned %d records with continuation %v, want fail-closed empty page", records, hasNext)
+	}
+	wantLength := len(raw)
+	if wantLength > 1<<16-1 {
+		wantLength = 1<<16 - 1
+	}
+	if invalid.CursorLength != uint16(wantLength) {
+		t.Errorf("cursor error length = %d, want bounded raw length %d", invalid.CursorLength, wantLength)
+	}
+}

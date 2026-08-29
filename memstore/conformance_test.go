@@ -35,3 +35,8 @@ func TestBlobsConformance(t *testing.T) {
 	t.Parallel()
 	storetest.TestBlobs(t, func(t *testing.T) storage.Blobs { return memstore.New().Blobs })
 }
+
+func TestOrderedIndexConformance(t *testing.T) {
+	t.Parallel()
+	storetest.TestOrderedIndex(t, func(t *testing.T) storage.OrderedIndex { return memstore.New().OrderedIndex })
+}

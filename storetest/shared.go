@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"testing"
+	"time"
 
 	"github.com/looprig/storage"
 )
@@ -13,6 +14,11 @@ import (
 // must accept (1 MiB); the suites exercise it as the "payload floor". Larger
 // payloads are the engine's responsibility to offload to Blobs.
 const payloadFloor = 1 << 20
+
+// conformanceTimeout bounds each provider interaction in a shared suite. It
+// keeps a stalled remote backend from making an entire conformance run hang
+// while leaving ordinary local and networked implementations ample time.
+const conformanceTimeout = 5 * time.Second
 
 // invalidName pairs a name that violates the storage grammar with a human label
 // used to name its subtest.
