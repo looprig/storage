@@ -962,11 +962,74 @@ func requireOrderedRevisionConflict(t *testing.T, operation string, err error, i
 	}
 }
 
+// requireOrderedIndexRecordEqual is the suite's most-used assertion, and its
+// audience is a provider author debugging their own backend. Nearly every call
+// compares a record with its own expected form, so naming the two IDs says
+// nothing: the message reports which field diverged, then both full summaries
+// for context.
 func requireOrderedIndexRecordEqual(t *testing.T, label string, got storage.OrderedRecord, want storage.OrderedRecord) {
 	t.Helper()
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("%s record %s differs from canonical record %s", label, orderedIndexIDLabel(got.ID), orderedIndexIDLabel(want.ID))
+	if reflect.DeepEqual(got, want) {
+		return
 	}
+	difference := orderedIndexRecordDifference(got, want)
+	if difference == "" {
+		// DeepEqual saw a divergence the field walk did not, which means the
+		// record grew a field the walk has not been taught about.
+		difference = "records are not deeply equal but no field difference was identified; orderedIndexRecordDifference is out of date with storage.OrderedRecord"
+	}
+	t.Errorf("%s: %s\n  got:  %s\n  want: %s", label, difference, orderedIndexRecordSummary(got), orderedIndexRecordSummary(want))
+}
+
+// orderedIndexRecordDifference describes how got diverges from want, field by
+// field, and returns "" when they match. Value gets byte-level treatment
+// because the record summary prints only its length, which is exactly the
+// divergence a copy-in/copy-out aliasing bug produces.
+func orderedIndexRecordDifference(got storage.OrderedRecord, want storage.OrderedRecord) string {
+	var differences []string
+	if got.ID != want.ID {
+		differences = append(differences, fmt.Sprintf("ID %s != %s", orderedIndexIDLabel(got.ID), orderedIndexIDLabel(want.ID)))
+	}
+	if got.RankingScope != want.RankingScope {
+		differences = append(differences, fmt.Sprintf("RankingScope %q != %q", got.RankingScope, want.RankingScope))
+	}
+	if got.Revision != want.Revision {
+		differences = append(differences, fmt.Sprintf("Revision %d != %d", got.Revision, want.Revision))
+	}
+	if got.Order != want.Order {
+		differences = append(differences, fmt.Sprintf("Order %d != %d", got.Order, want.Order))
+	}
+	if got.Due != want.Due {
+		differences = append(differences, fmt.Sprintf("Due %d/%d != %d/%d", got.Due.State, got.Due.UnixMillis, want.Due.State, want.Due.UnixMillis))
+	}
+	if got.Rank != want.Rank {
+		differences = append(differences, fmt.Sprintf("Rank %t/%d != %t/%d", got.Rank.Ranked, got.Rank.Value, want.Rank.Ranked, want.Rank.Value))
+	}
+	if got.Deleted != want.Deleted {
+		differences = append(differences, fmt.Sprintf("Deleted %t != %t", got.Deleted, want.Deleted))
+	}
+	if value := orderedIndexValueDifference(got.Value, want.Value); value != "" {
+		differences = append(differences, value)
+	}
+	return strings.Join(differences, "; ")
+}
+
+func orderedIndexValueDifference(got []byte, want []byte) string {
+	if bytes.Equal(got, want) {
+		// reflect.DeepEqual, which gates this report, separates a nil Value from
+		// an empty one; bytes.Equal does not. Name that case rather than let it
+		// fall through as an unidentified divergence.
+		if (got == nil) != (want == nil) {
+			return fmt.Sprintf("Value nil %t != nil %t (both empty)", got == nil, want == nil)
+		}
+		return ""
+	}
+	for i := 0; i < len(got) && i < len(want); i++ {
+		if got[i] != want[i] {
+			return fmt.Sprintf("Value differs at byte %d: %#x != %#x (lengths %d and %d)", i, got[i], want[i], len(got), len(want))
+		}
+	}
+	return fmt.Sprintf("Value length %d != %d with a common prefix", len(got), len(want))
 }
 
 // requireStrictlyIncreasingOrders asserts the whole of what the contract says
