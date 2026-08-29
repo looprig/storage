@@ -974,3 +974,58 @@ func TestOrderedCursorsAreInstanceIndependent(t *testing.T) {
 		t.Errorf("replica due continuation = %v, want %v", got, want)
 	}
 }
+
+// TestOrderedMutationsRefuseToPublishInvalidRecords pins ValidateOrderedRecord
+// to the provider's publish boundary. Every mutation builds the next
+// externally observable snapshot from stored state, so it validates that
+// snapshot before it replaces the authoritative record; a record that would
+// violate the contract's observable representation is refused and the store is
+// left untouched.
+func TestOrderedMutationsRefuseToPublishInvalidRecords(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := newOrderedStore()
+	id := orderedTestID("acceptance", "corrupt")
+	mustCreateOrdered(t, store, id, "workers", []byte("value"), storage.Rank{Ranked: true, Value: 1}, storage.Due{State: storage.DueAt, UnixMillis: 1})
+
+	key := orderedIdentityFor(id)
+	corrupt := store.records[key]
+	// Order zero is unreachable through the public API: it is the sentinel the
+	// contract reserves for "no order assigned".
+	corrupt.Order = 0
+	store.records[key] = corrupt
+
+	tests := []struct {
+		name   string
+		mutate func() (storage.OrderedRecord, error)
+	}{
+		{
+			name: "update",
+			mutate: func() (storage.OrderedRecord, error) {
+				return store.Update(ctx, id, corrupt.Revision, []byte("next"), storage.Rank{Ranked: true, Value: 2}, storage.Due{State: storage.NotDue})
+			},
+		},
+		{
+			name: "delete",
+			mutate: func() (storage.OrderedRecord, error) {
+				return store.Delete(ctx, id, corrupt.Revision)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			record, err := tt.mutate()
+			var target *storage.InvalidOrderedRecordError
+			if !errors.As(err, &target) {
+				t.Fatalf("%s(corrupt record) = %#v, err %T %v; want *storage.InvalidOrderedRecordError", tt.name, record, err, err)
+			}
+			if target.ID != id {
+				t.Errorf("%s(corrupt record) error ID = %v, want %v", tt.name, target.ID, id)
+			}
+			if stored := store.records[key]; !reflect.DeepEqual(stored, corrupt) {
+				t.Errorf("%s(corrupt record) changed stored state: got %#v, want %#v", tt.name, stored, corrupt)
+			}
+		})
+	}
+}

@@ -149,7 +149,9 @@ func (s *orderedStore) Get(ctx context.Context, id storage.OrderedID) (storage.O
 // Create atomically returns the existing canonical record for a duplicate or,
 // after validating a previously absent candidate, allocates the next immutable
 // order in id's order scope. Candidate validation deliberately occurs after the
-// duplicate lookup, as required for idempotent retry behavior.
+// duplicate lookup, as required for idempotent retry behavior. The assembled
+// snapshot passes storage.ValidateOrderedRecord before it is published, so no
+// mutation can install a record that violates the observable representation.
 func (s *orderedStore) Create(ctx context.Context, id storage.OrderedID, rankingScope string, value []byte, rank storage.Rank, due storage.Due) (storage.OrderedRecord, bool, error) {
 	if err := storage.ValidateOrderedID(id); err != nil {
 		return storage.OrderedRecord{}, false, err
@@ -187,6 +189,9 @@ func (s *orderedStore) Create(ctx context.Context, id storage.OrderedID, ranking
 		Due:          due,
 		Rank:         rank,
 		Value:        cloneOrderedBytes(value),
+	}
+	if err := storage.ValidateOrderedRecord(record); err != nil {
+		return storage.OrderedRecord{}, false, err
 	}
 	s.records[key] = record
 	s.highWater[scope] = order
@@ -235,14 +240,18 @@ func (s *orderedStore) Update(ctx context.Context, id storage.OrderedID, expecte
 		return storage.OrderedRecord{}, &storage.OrderedRevisionExhaustedError{ID: id, Revision: record.Revision}
 	}
 
+	next := record
+	next.Revision++
+	next.Value = cloneOrderedBytes(value)
+	next.Rank = rank
+	next.Due = due
+	if err := storage.ValidateOrderedRecord(next); err != nil {
+		return storage.OrderedRecord{}, err
+	}
 	s.removeCurrentIndexesLocked(key, record)
-	record.Revision++
-	record.Value = cloneOrderedBytes(value)
-	record.Rank = rank
-	record.Due = due
-	s.records[key] = record
-	s.insertCurrentIndexesLocked(key, record)
-	return cloneOrderedRecord(record), nil
+	s.records[key] = next
+	s.insertCurrentIndexesLocked(key, next)
+	return cloneOrderedRecord(next), nil
 }
 
 // Delete turns a live record into its terminal tombstone in one revision CAS.
@@ -283,13 +292,17 @@ func (s *orderedStore) Delete(ctx context.Context, id storage.OrderedID, expecte
 		return storage.OrderedRecord{}, &storage.OrderedRevisionExhaustedError{ID: id, Revision: record.Revision}
 	}
 
+	tombstone := record
+	tombstone.Revision++
+	tombstone.Deleted = true
+	tombstone.Rank = storage.Rank{}
+	tombstone.Due = storage.Due{State: storage.NotDue}
+	if err := storage.ValidateOrderedRecord(tombstone); err != nil {
+		return storage.OrderedRecord{}, err
+	}
 	s.removeCurrentIndexesLocked(key, record)
-	record.Revision++
-	record.Deleted = true
-	record.Rank = storage.Rank{}
-	record.Due = storage.Due{State: storage.NotDue}
-	s.records[key] = record
-	return cloneOrderedRecord(record), nil
+	s.records[key] = tombstone
+	return cloneOrderedRecord(tombstone), nil
 }
 
 // ListOrdered reads the per-order-scope immutable index after the direct
