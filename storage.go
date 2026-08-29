@@ -1,8 +1,9 @@
-// Package storage defines four neutral storage primitives — Ledger (an
+// Package storage defines five neutral storage primitives — Ledger (an
 // append-only, CAS-sequenced record log), Leaser (a single-writer epoch lease),
-// KV (revision-CAS metadata), and Blobs (content-addressed immutable bytes) —
-// plus a typed error taxonomy, ValidateName, and the AppendDefinite ambiguity
-// resolver.
+// KV (revision-CAS metadata), Blobs (content-addressed immutable bytes), and
+// OrderedIndex (durable records with immutable acceptance order and current
+// ranked and due views) — plus a typed error taxonomy, ValidateName, and the
+// AppendDefinite ambiguity resolver.
 //
 // Names and keys are canonical by construction (see ValidateName), so no two
 // valid names alias one backend location. Every backend must accept ledger
@@ -93,18 +94,22 @@ type Blobs interface {
 	List(ctx context.Context, prefix string) ([]string, error)
 }
 
-// Composite satisfies Ledger+Leaser+KV+Blobs by embedding one provider per
-// primitive. Assembled where dependencies are wired, never inside engines.
+// Composite holds the storage primitives assembled where dependencies are
+// wired, never inside engines. OrderedIndex remains a named field rather than
+// an embedded primitive because Ledger, KV, and Blobs already have colliding
+// method names when promoted together.
 type Composite struct {
 	Ledger
 	Leaser
 	KV
 	Blobs
+	OrderedIndex OrderedIndex
 }
 
-// IncompleteCompositeError reports that NewComposite was handed one or more nil
-// primitives. Missing names them in field order (Ledger, Leaser, KV, Blobs) so
-// the assembly site knows exactly which providers were not wired.
+// IncompleteCompositeError reports that NewComposite or
+// NewCompositeWithOrderedIndex was handed one or more nil primitives. Missing
+// names them in field order (Ledger, Leaser, KV, Blobs, OrderedIndex) so the
+// assembly site knows exactly which providers were not wired.
 type IncompleteCompositeError struct {
 	Missing []string
 }
@@ -113,9 +118,38 @@ func (e *IncompleteCompositeError) Error() string {
 	return "storage: incomplete composite: missing [" + strings.Join(e.Missing, " ") + "]"
 }
 
-// NewComposite assembles a Composite, rejecting any nil primitive up front so a
-// partially-wired backend fails at the composition root rather than at first use.
+// NewComposite assembles the legacy four-primitive Composite, rejecting any nil
+// primitive up front so a partially-wired backend fails at the composition root
+// rather than at first use. It intentionally leaves OrderedIndex nil for
+// backwards compatibility: existing callers do not need to change. SessionStore
+// (and any other component that requires ordered records) is responsible for
+// rejecting a Composite whose OrderedIndex is nil at its own composition boundary.
 func NewComposite(l Ledger, le Leaser, kv KV, bl Blobs) (*Composite, error) {
+	missing := missingCompositePrimitives(l, le, kv, bl)
+	if len(missing) > 0 {
+		return nil, &IncompleteCompositeError{Missing: missing}
+	}
+	return &Composite{Ledger: l, Leaser: le, KV: kv, Blobs: bl}, nil
+}
+
+// NewCompositeWithOrderedIndex assembles all five storage primitives. Unlike
+// NewComposite, it requires OrderedIndex so a component whose contract uses
+// ordered records can fail during wiring rather than on its first operation.
+func NewCompositeWithOrderedIndex(l Ledger, le Leaser, kv KV, bl Blobs, oi OrderedIndex) (*Composite, error) {
+	missing := missingCompositePrimitives(l, le, kv, bl)
+	if oi == nil {
+		missing = append(missing, "OrderedIndex")
+	}
+	if len(missing) > 0 {
+		return nil, &IncompleteCompositeError{Missing: missing}
+	}
+	return &Composite{Ledger: l, Leaser: le, KV: kv, Blobs: bl, OrderedIndex: oi}, nil
+}
+
+// missingCompositePrimitives reports literal nil providers in the stable
+// legacy field order. It intentionally preserves NewComposite's existing
+// interface typed-nil behavior for compatibility.
+func missingCompositePrimitives(l Ledger, le Leaser, kv KV, bl Blobs) []string {
 	var missing []string
 	if l == nil {
 		missing = append(missing, "Ledger")
@@ -129,8 +163,5 @@ func NewComposite(l Ledger, le Leaser, kv KV, bl Blobs) (*Composite, error) {
 	if bl == nil {
 		missing = append(missing, "Blobs")
 	}
-	if len(missing) > 0 {
-		return nil, &IncompleteCompositeError{Missing: missing}
-	}
-	return &Composite{Ledger: l, Leaser: le, KV: kv, Blobs: bl}, nil
+	return missing
 }

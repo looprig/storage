@@ -35,8 +35,7 @@ func (e *AmbiguousError) Error() string {
 	return "storage: ledger " + strconv.Quote(e.Name) + " append ambiguous at expected seq " + strconv.FormatUint(e.Expected, 10)
 }
 
-// Unwrap returns the underlying cause (possibly nil). AmbiguousError is the only
-// error in the taxonomy that carries and exposes a cause.
+// Unwrap returns the underlying cause (possibly nil).
 func (e *AmbiguousError) Unwrap() error {
 	return e.Cause
 }
@@ -99,4 +98,233 @@ type LeaseLostError struct {
 
 func (e *LeaseLostError) Error() string {
 	return "storage: lease " + strconv.Quote(e.Name) + " lost at epoch " + strconv.FormatUint(e.Epoch, 10)
+}
+
+// InvalidStableKeyError reports an OrderedID StableKey that is empty, too long,
+// or not valid UTF-8. Stable keys are opaque and are not constrained by the
+// storage name grammar.
+type InvalidStableKeyError struct {
+	StableKey StableKey
+	Rule      string
+}
+
+func (e *InvalidStableKeyError) Error() string {
+	return "storage: invalid ordered stable key " + strconv.Quote(string(e.StableKey)) + ": " + e.Rule
+}
+
+// InvalidDueError reports a Due state that is not canonical or uses an unknown
+// discriminator.
+type InvalidDueError struct {
+	Due  Due
+	Rule string
+}
+
+func (e *InvalidDueError) Error() string {
+	return "storage: invalid ordered due state " + strconv.FormatUint(uint64(e.Due.State), 10) + " at unix millis " + strconv.FormatInt(e.Due.UnixMillis, 10) + ": " + e.Rule
+}
+
+// InvalidOrderedRecordError reports an OrderedRecord that violates an
+// invariant that crosses multiple fields.
+type InvalidOrderedRecordError struct {
+	ID   OrderedID
+	Rule string
+}
+
+func (e *InvalidOrderedRecordError) Error() string {
+	return "storage: invalid ordered record " + orderedIDSubject(e.ID) + ": " + e.Rule
+}
+
+// OrderedValueTooLargeError reports an OrderedIndex value over the supported
+// maximum size in bytes.
+type OrderedValueTooLargeError struct {
+	Size int
+	Max  int
+}
+
+func (e *OrderedValueTooLargeError) Error() string {
+	return "storage: ordered value size " + strconv.Itoa(e.Size) + " exceeds maximum " + strconv.Itoa(e.Max)
+}
+
+// InvalidOrderedLimitError reports a List* limit outside the inclusive range
+// 1..Max.
+type InvalidOrderedLimitError struct {
+	Limit int
+	Max   int
+}
+
+func (e *InvalidOrderedLimitError) Error() string {
+	return "storage: invalid ordered page limit " + strconv.Itoa(e.Limit) + ": must be in [1, " + strconv.Itoa(e.Max) + "]"
+}
+
+// OrderedCursorKind identifies the query family that rejected a cursor.
+type OrderedCursorKind string
+
+const (
+	// RankedCursorKind identifies a ListRanked continuation cursor.
+	RankedCursorKind OrderedCursorKind = "ranked"
+
+	// DueCursorKind identifies a ListDue continuation cursor.
+	DueCursorKind OrderedCursorKind = "due"
+)
+
+func (k OrderedCursorKind) String() string {
+	switch k {
+	case RankedCursorKind:
+		return "ranked"
+	case DueCursorKind:
+		return "due"
+	default:
+		return "unknown"
+	}
+}
+
+// OrderedCursorRule classifies why a provider rejected an opaque cursor. Its
+// String form is fixed so error rendering never relies on provider-supplied
+// token text.
+type OrderedCursorRule uint8
+
+const (
+	// OrderedCursorMalformed reports a syntactically malformed token.
+	OrderedCursorMalformed OrderedCursorRule = iota + 1
+
+	// OrderedCursorUnknownVersion reports an unsupported token version.
+	OrderedCursorUnknownVersion
+
+	// OrderedCursorWrongKind reports a token issued for another cursor family.
+	OrderedCursorWrongKind
+
+	// OrderedCursorQueryMismatch reports a token bound to another query.
+	OrderedCursorQueryMismatch
+
+	// OrderedCursorExpired reports a token that is no longer valid.
+	OrderedCursorExpired
+)
+
+func (r OrderedCursorRule) String() string {
+	switch r {
+	case OrderedCursorMalformed:
+		return "malformed"
+	case OrderedCursorUnknownVersion:
+		return "unknown version"
+	case OrderedCursorWrongKind:
+		return "wrong kind"
+	case OrderedCursorQueryMismatch:
+		return "query mismatch"
+	case OrderedCursorExpired:
+		return "expired"
+	default:
+		return "invalid"
+	}
+}
+
+// InvalidOrderedCursorError reports a malformed, unknown-version, wrong-kind,
+// expired, cross-query, or otherwise unusable opaque OrderedIndex continuation
+// cursor. Kind identifies the listing operation that rejected it. Rule is a
+// safe classification. CursorLength is the raw token's bounded byte length;
+// neither it nor Error exposes raw opaque cursor contents.
+type InvalidOrderedCursorError struct {
+	Kind         OrderedCursorKind
+	Rule         OrderedCursorRule
+	CursorLength uint16
+}
+
+func (e *InvalidOrderedCursorError) Error() string {
+	return "storage: invalid " + e.Kind.String() + " ordered cursor: " + e.Rule.String()
+}
+
+const maxInvalidOrderedCursorLength = 1<<16 - 1
+
+// NewInvalidOrderedCursorError constructs an error for cursor while retaining
+// only its safe, bounded byte length. Providers must use it rather than placing
+// raw cursor contents in an error or log message.
+func NewInvalidOrderedCursorError(kind OrderedCursorKind, cursor string, rule OrderedCursorRule) *InvalidOrderedCursorError {
+	length := len(cursor)
+	if length > maxInvalidOrderedCursorLength {
+		length = maxInvalidOrderedCursorLength
+	}
+	return &InvalidOrderedCursorError{Kind: kind, Rule: rule, CursorLength: uint16(length)}
+}
+
+// OrderedRevisionConflictError reports an OrderedIndex compare-and-swap whose
+// current revision did not equal ExpectedRevision. ActualRevision is the
+// current revision observed by a backend when it can determine it; a backend
+// that cannot safely disclose it leaves it zero.
+type OrderedRevisionConflictError struct {
+	ID               OrderedID
+	ExpectedRevision uint64
+	ActualRevision   uint64
+}
+
+func (e *OrderedRevisionConflictError) Error() string {
+	return "storage: ordered record " + orderedIDSubject(e.ID) + " revision conflict: expected " + strconv.FormatUint(e.ExpectedRevision, 10) + ", actual " + strconv.FormatUint(e.ActualRevision, 10)
+}
+
+// OrderedRevisionExhaustedError reports a mutation that cannot advance a live
+// OrderedRecord revision without overflowing uint64. The provider leaves the
+// record unchanged.
+type OrderedRevisionExhaustedError struct {
+	ID       OrderedID
+	Revision uint64
+}
+
+func (e *OrderedRevisionExhaustedError) Error() string {
+	return "storage: ordered record " + orderedIDSubject(e.ID) + " revision exhausted at " + strconv.FormatUint(e.Revision, 10)
+}
+
+// OrderedRecordNotFoundError reports an ordered identity that has never been
+// created. Tombstoned records are distinct from absent records.
+type OrderedRecordNotFoundError struct {
+	ID OrderedID
+}
+
+func (e *OrderedRecordNotFoundError) Error() string {
+	return "storage: ordered record " + orderedIDSubject(e.ID) + " not found"
+}
+
+// OrderedDeletedError reports an Update attempted against a logical tombstone.
+// Tombstones cannot be resurrected through OrderedIndex.
+type OrderedDeletedError struct {
+	ID OrderedID
+}
+
+func (e *OrderedDeletedError) Error() string {
+	return "storage: ordered record " + orderedIDSubject(e.ID) + " is deleted"
+}
+
+// OrderedOperation identifies a mutation whose outcome could be ambiguous.
+type OrderedOperation string
+
+const (
+	// OrderedCreateOperation identifies Create.
+	OrderedCreateOperation OrderedOperation = "create"
+
+	// OrderedUpdateOperation identifies Update.
+	OrderedUpdateOperation OrderedOperation = "update"
+
+	// OrderedDeleteOperation identifies Delete.
+	OrderedDeleteOperation OrderedOperation = "delete"
+)
+
+// OrderedAmbiguousError reports a networked OrderedIndex mutation whose
+// acknowledgement was lost or timed out, so the mutation may or may not have
+// committed. Cause carries the underlying transport error and may be nil.
+type OrderedAmbiguousError struct {
+	Operation OrderedOperation
+	ID        OrderedID
+	Cause     error
+}
+
+func (e *OrderedAmbiguousError) Error() string {
+	return "storage: ordered " + string(e.Operation) + " ambiguous for " + orderedIDSubject(e.ID)
+}
+
+// Unwrap returns the underlying cause (possibly nil).
+func (e *OrderedAmbiguousError) Unwrap() error {
+	return e.Cause
+}
+
+// orderedIDSubject formats an OrderedID for a typed error message without ever
+// interpreting StableKey as a name or a path.
+func orderedIDSubject(id OrderedID) string {
+	return "(namespace " + strconv.Quote(id.Namespace) + ", ordering scope " + strconv.Quote(id.OrderingScope) + ", stable key " + strconv.Quote(string(id.StableKey)) + ")"
 }

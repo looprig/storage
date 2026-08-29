@@ -82,6 +82,39 @@ func (*stubBlobs) List(ctx context.Context, prefix string) ([]string, error) {
 	panic("stubBlobs.List not called")
 }
 
+// stubOrderedIndex satisfies OrderedIndex without backing storage so the
+// Composite constructors can be exercised without coupling this contract test
+// to a particular backend.
+type stubOrderedIndex struct{}
+
+func (*stubOrderedIndex) Get(ctx context.Context, id OrderedID) (OrderedRecord, error) {
+	panic("stubOrderedIndex.Get not called")
+}
+
+func (*stubOrderedIndex) Create(ctx context.Context, id OrderedID, rankingScope string, value []byte, rank Rank, due Due) (OrderedRecord, bool, error) {
+	panic("stubOrderedIndex.Create not called")
+}
+
+func (*stubOrderedIndex) Update(ctx context.Context, id OrderedID, expectedRevision uint64, value []byte, rank Rank, due Due) (OrderedRecord, error) {
+	panic("stubOrderedIndex.Update not called")
+}
+
+func (*stubOrderedIndex) Delete(ctx context.Context, id OrderedID, expectedRevision uint64) (OrderedRecord, error) {
+	panic("stubOrderedIndex.Delete not called")
+}
+
+func (*stubOrderedIndex) ListOrdered(ctx context.Context, namespace string, orderingScope string, afterOrder uint64, limit int) (OrderedPage, error) {
+	panic("stubOrderedIndex.ListOrdered not called")
+}
+
+func (*stubOrderedIndex) ListRanked(ctx context.Context, namespace string, rankingScope string, after RankedCursor, limit int) (RankedPage, error) {
+	panic("stubOrderedIndex.ListRanked not called")
+}
+
+func (*stubOrderedIndex) ListDue(ctx context.Context, namespace string, dueAtOrBefore int64, after DueCursor, limit int) (DuePage, error) {
+	panic("stubOrderedIndex.ListDue not called")
+}
+
 func TestNewComposite(t *testing.T) {
 	t.Parallel()
 
@@ -139,6 +172,9 @@ func TestNewComposite(t *testing.T) {
 				if c.Blobs != tt.bl {
 					t.Errorf("Composite.Blobs = %v, want %v", c.Blobs, tt.bl)
 				}
+				if c.OrderedIndex != nil {
+					t.Errorf("Composite.OrderedIndex = %v, want nil from legacy NewComposite", c.OrderedIndex)
+				}
 				return
 			}
 
@@ -165,6 +201,66 @@ func TestNewComposite(t *testing.T) {
 				if !strings.Contains(msg, want) {
 					t.Errorf("Error() = %q, want it to contain %q", msg, want)
 				}
+			}
+		})
+	}
+}
+
+func TestNewCompositeWithOrderedIndex(t *testing.T) {
+	t.Parallel()
+
+	l := &stubLedger{}
+	le := &stubLeaser{}
+	kv := &stubKV{}
+	bl := &stubBlobs{}
+	oi := &stubOrderedIndex{}
+
+	tests := []struct {
+		name        string
+		l           Ledger
+		le          Leaser
+		kv          KV
+		bl          Blobs
+		oi          OrderedIndex
+		wantMissing []string
+	}{
+		{name: "all present", l: l, le: le, kv: kv, bl: bl, oi: oi},
+		{name: "nil ordered index", l: l, le: le, kv: kv, bl: bl, wantMissing: []string{"OrderedIndex"}},
+		{name: "ledger and ordered index nil", le: le, kv: kv, bl: bl, wantMissing: []string{"Ledger", "OrderedIndex"}},
+		{name: "all nil", wantMissing: []string{"Ledger", "Leaser", "KV", "Blobs", "OrderedIndex"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			c, err := NewCompositeWithOrderedIndex(tt.l, tt.le, tt.kv, tt.bl, tt.oi)
+
+			if tt.wantMissing == nil {
+				if err != nil {
+					t.Fatalf("NewCompositeWithOrderedIndex() unexpected error: %v", err)
+				}
+				if c == nil {
+					t.Fatal("NewCompositeWithOrderedIndex() returned nil Composite on success")
+				}
+				if c.Ledger != tt.l || c.Leaser != tt.le || c.KV != tt.kv || c.Blobs != tt.bl || c.OrderedIndex != tt.oi {
+					t.Errorf("NewCompositeWithOrderedIndex() returned wrong providers: %#v", c)
+				}
+				return
+			}
+
+			if c != nil {
+				t.Errorf("NewCompositeWithOrderedIndex() returned non-nil Composite on error: %#v", c)
+			}
+			var ice *IncompleteCompositeError
+			if !errors.As(err, &ice) {
+				t.Fatalf("NewCompositeWithOrderedIndex() error = %v, want *IncompleteCompositeError", err)
+			}
+			if !reflect.DeepEqual(ice.Missing, tt.wantMissing) {
+				t.Errorf("Missing = %v, want exactly %v", ice.Missing, tt.wantMissing)
+			}
+			if !strings.Contains(ice.Error(), "OrderedIndex") && strings.Contains(strings.Join(tt.wantMissing, " "), "OrderedIndex") {
+				t.Errorf("Error() = %q, want it to name OrderedIndex", ice.Error())
 			}
 		})
 	}
