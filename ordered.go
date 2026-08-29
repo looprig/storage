@@ -119,13 +119,14 @@ type DuePage struct {
 
 // OrderedIndex provides a durable record collection with immutable
 // acceptance order plus current ranked and due views. Implementations validate
-// the identifiers, scopes, due state, value size, and page limits at their
-// public boundary using the validators below. Every method that accepts an
-// OrderedID (Get, Create, Update, and Delete) validates it first with
-// ValidateOrderedID before inspecting or mutating a record. A canceled context
-// may return its ordinary context error. A networked mutation with an
-// indeterminate outcome returns *OrderedAmbiguousError; local implementations
-// never do.
+// relevant inputs at their public boundary using the validators below. Each
+// method's validation, lookup, and CAS precedence is authoritative; this
+// overview does not impose an order beyond those method-specific rules. Every
+// method that accepts an OrderedID (Get, Create, Update, and Delete) validates
+// it first with ValidateOrderedID before inspecting or mutating a record. A
+// canceled context may return its ordinary context error. A networked mutation
+// with an indeterminate outcome returns *OrderedAmbiguousError; local
+// implementations never do.
 // Nonempty ranked and due cursors are provider-issued opaque versioned tokens;
 // implementations must fail closed with *InvalidOrderedCursorError of the
 // matching cursor Kind if one is malformed, has an unknown version, has the
@@ -198,13 +199,13 @@ type OrderedIndex interface {
 // ValidateStableKey reports whether key is a valid opaque StableKey.
 func ValidateStableKey(key StableKey) error {
 	if len(key) == 0 {
-		return &InvalidStableKeyError{StableKey: key, Rule: "empty"}
+		return newInvalidStableKeyError(key, "empty")
 	}
 	if len(key) > MaxStableKeyBytes {
-		return &InvalidStableKeyError{StableKey: key, Rule: "too long"}
+		return newInvalidStableKeyError(key, "too long")
 	}
 	if !utf8.ValidString(string(key)) {
-		return &InvalidStableKeyError{StableKey: key, Rule: "invalid UTF-8"}
+		return newInvalidStableKeyError(key, "invalid UTF-8")
 	}
 	return nil
 }

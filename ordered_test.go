@@ -21,9 +21,10 @@ func TestValidateStableKey(t *testing.T) {
 
 	invalidUTF8 := StableKey(string([]byte{0xff, 'x'}))
 	tests := []struct {
-		name    string
-		key     StableKey
-		wantErr bool
+		name     string
+		key      StableKey
+		wantErr  bool
+		wantRule string
 	}{
 		{name: "versioned opaque key", key: StableKey("v1:ABC_def-09")},
 		{name: "slash is opaque", key: StableKey("slash/value")},
@@ -31,9 +32,9 @@ func TestValidateStableKey(t *testing.T) {
 		{name: "embedded unicode is opaque", key: StableKey("caf\u00e9/\u4e16\u754c")},
 		{name: "one byte", key: StableKey("x")},
 		{name: "exactly 256 bytes", key: StableKey(strings.Repeat("x", 256))},
-		{name: "empty", key: "", wantErr: true},
-		{name: "invalid utf8", key: invalidUTF8, wantErr: true},
-		{name: "257 bytes", key: StableKey(strings.Repeat("x", 257)), wantErr: true},
+		{name: "empty", key: "", wantErr: true, wantRule: "empty"},
+		{name: "invalid utf8", key: invalidUTF8, wantErr: true, wantRule: "invalid UTF-8"},
+		{name: "257 bytes", key: StableKey(strings.Repeat("x", 257)), wantErr: true, wantRule: "too long"},
 	}
 
 	for _, tt := range tests {
@@ -54,10 +55,39 @@ func TestValidateStableKey(t *testing.T) {
 			if !errors.As(err, &target) {
 				t.Fatalf("ValidateStableKey(%q) error type = %T, want *InvalidStableKeyError", tt.key, err)
 			}
-			if target.StableKey != tt.key {
-				t.Errorf("InvalidStableKeyError.StableKey = %q, want %q", target.StableKey, tt.key)
+			if target.Rule != tt.wantRule {
+				t.Errorf("InvalidStableKeyError.Rule = %q, want %q", target.Rule, tt.wantRule)
 			}
 		})
+	}
+}
+
+func TestInvalidStableKeyErrorDoesNotExposeRawInput(t *testing.T) {
+	t.Parallel()
+
+	sensitive := StableKey(strings.Repeat("stable-key-secret-", 4096))
+	err := ValidateStableKey(sensitive)
+	var target *InvalidStableKeyError
+	if !errors.As(err, &target) {
+		t.Fatalf("ValidateStableKey() error = %T %v, want *InvalidStableKeyError", err, err)
+	}
+	if target.Rule != "too long" {
+		t.Fatalf("InvalidStableKeyError.Rule = %q, want too long", target.Rule)
+	}
+	if strings.Contains(target.Error(), string(sensitive)) {
+		t.Fatal("InvalidStableKeyError.Error() must not render the raw StableKey")
+	}
+
+	errorType := reflect.TypeOf(*target)
+	if _, exposed := errorType.FieldByName("StableKey"); exposed {
+		t.Fatal("InvalidStableKeyError must not retain a raw StableKey field")
+	}
+	lengthField, found := errorType.FieldByName("StableKeyLength")
+	if !found {
+		t.Fatal("InvalidStableKeyError must retain a capped StableKeyLength diagnostic")
+	}
+	if got, want := reflect.ValueOf(*target).FieldByIndex(lengthField.Index).Uint(), uint64(1<<16-1); got != want {
+		t.Errorf("InvalidStableKeyError.StableKeyLength = %d, want capped %d", got, want)
 	}
 }
 
@@ -284,9 +314,10 @@ func TestOrderedErrorTaxonomy(t *testing.T) {
 
 	id := OrderedID{Namespace: "sessions", OrderingScope: "acceptance", StableKey: "v1:ABC_def-09"}
 	tests := []struct {
-		name string
-		err  error
-		as   func(error) bool
+		name               string
+		err                error
+		as                 func(error) bool
+		wantErrorSubstring string
 	}{
 		{
 			name: "revision conflict",
@@ -294,6 +325,15 @@ func TestOrderedErrorTaxonomy(t *testing.T) {
 			as: func(err error) bool {
 				var target *OrderedRevisionConflictError
 				return errors.As(err, &target) && target.ID == id && target.ExpectedRevision == 3 && target.ActualRevision == 4
+			},
+		},
+		{
+			name:               "revision conflict actual unknown",
+			err:                &OrderedRevisionConflictError{ID: id, ExpectedRevision: 3},
+			wantErrorSubstring: "actual unknown",
+			as: func(err error) bool {
+				var target *OrderedRevisionConflictError
+				return errors.As(err, &target) && target.ID == id && target.ExpectedRevision == 3 && target.ActualRevision == 0
 			},
 		},
 		{
@@ -339,6 +379,9 @@ func TestOrderedErrorTaxonomy(t *testing.T) {
 			}
 			if !strings.HasPrefix(tt.err.Error(), "storage: ") {
 				t.Errorf("Error() = %q, want storage prefix", tt.err.Error())
+			}
+			if tt.wantErrorSubstring != "" && !strings.Contains(tt.err.Error(), tt.wantErrorSubstring) {
+				t.Errorf("Error() = %q, want it to contain %q", tt.err.Error(), tt.wantErrorSubstring)
 			}
 		})
 	}

@@ -102,14 +102,27 @@ func (e *LeaseLostError) Error() string {
 
 // InvalidStableKeyError reports an OrderedID StableKey that is empty, too long,
 // or not valid UTF-8. Stable keys are opaque and are not constrained by the
-// storage name grammar.
+// storage name grammar. StableKeyLength is the input's byte length capped at
+// 65,535; the error never retains or renders the raw key.
 type InvalidStableKeyError struct {
-	StableKey StableKey
-	Rule      string
+	Rule            string
+	StableKeyLength uint16
 }
 
 func (e *InvalidStableKeyError) Error() string {
-	return "storage: invalid ordered stable key " + strconv.Quote(string(e.StableKey)) + ": " + e.Rule
+	return "storage: invalid ordered stable key with " + strconv.Itoa(int(e.StableKeyLength)) + " bytes: " + e.Rule
+}
+
+const maxInvalidStableKeyDiagnosticBytes = 1<<16 - 1
+
+// newInvalidStableKeyError preserves only safe diagnostics for a rejected
+// StableKey. It is intentionally the sole constructor used by validation.
+func newInvalidStableKeyError(key StableKey, rule string) *InvalidStableKeyError {
+	length := len(key)
+	if length > maxInvalidStableKeyDiagnosticBytes {
+		length = maxInvalidStableKeyDiagnosticBytes
+	}
+	return &InvalidStableKeyError{Rule: rule, StableKeyLength: uint16(length)}
 }
 
 // InvalidDueError reports a Due state that is not canonical or uses an unknown
@@ -256,7 +269,11 @@ type OrderedRevisionConflictError struct {
 }
 
 func (e *OrderedRevisionConflictError) Error() string {
-	return "storage: ordered record " + orderedIDSubject(e.ID) + " revision conflict: expected " + strconv.FormatUint(e.ExpectedRevision, 10) + ", actual " + strconv.FormatUint(e.ActualRevision, 10)
+	actual := "unknown"
+	if e.ActualRevision != 0 {
+		actual = strconv.FormatUint(e.ActualRevision, 10)
+	}
+	return "storage: ordered record " + orderedIDSubject(e.ID) + " revision conflict: expected " + strconv.FormatUint(e.ExpectedRevision, 10) + ", actual " + actual
 }
 
 // OrderedRevisionExhaustedError reports a mutation that cannot advance a live
