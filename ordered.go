@@ -24,9 +24,12 @@ const MaxOrderedPageLimit = 1000
 // letters, punctuation, and Unicode.
 type StableKey string
 
-// OrderedID identifies an ordered record. Order is allocated independently
-// for every (Namespace, OrderingScope) pair; the same OrderingScope in another
-// Namespace has its own monotonic sequence.
+// OrderedID identifies an ordered record. The (Namespace, OrderingScope) pair
+// is the order scope: the unit within which Order strictly increases and is
+// never reused. The same OrderingScope in another Namespace is a separate order
+// scope with its own independent stream, though a provider may serve every
+// scope from one shared underlying sequence, so order values are not
+// comparable across scopes.
 type OrderedID struct {
 	Namespace     string
 	OrderingScope string
@@ -65,7 +68,13 @@ type Rank struct {
 // and every successful Update or live Delete advances it exactly once. Revision
 // never wraps to zero: if a provider cannot advance the maximal uint64 it
 // returns *OrderedRevisionExhaustedError without changing state. Order is
-// nonzero, immutable, and never reused within its order scope. Callers own
+// nonzero, immutable, strictly increasing within its order scope, and never
+// reused there — including after a tombstone. It is deliberately NOT required
+// to be contiguous or 1-based: a provider may allocate order from a JetStream
+// stream sequence or a shared SQL sequence, so orders may be sparse and may be
+// shared across order scopes. Callers resume from an exclusive order cursor,
+// for which density buys nothing, and must never infer a position, a count, or
+// a scope from an order value. Callers own
 // Value after it is returned; implementations must not retain or later mutate
 // caller-owned Value slices.
 type OrderedRecord struct {
@@ -150,7 +159,9 @@ type OrderedIndex interface {
 	// stored record with created == false without validating the candidate
 	// rankingScope, value, rank, or due state. Only when the identity is absent
 	// does Create validate those candidate fields, assign revision 1, and
-	// allocate the next nonzero immutable order.
+	// allocate a nonzero immutable order strictly greater than every order the
+	// scope has allocated before. It need not be the next integer: allocation
+	// may be sparse.
 	Create(ctx context.Context, id OrderedID, rankingScope string, value []byte, rank Rank, due Due) (record OrderedRecord, created bool, err error)
 
 	// Update validates id first. An absent record returns
@@ -188,6 +199,14 @@ type OrderedIndex interface {
 	// versioned, query-bound token. A malformed, unknown-version, wrong-kind,
 	// or query-mismatched token returns *InvalidOrderedCursorError with Kind
 	// RankedCursorKind.
+	//
+	// Pagination resumes from the frozen (rank, stable_key, ordering_scope)
+	// tuple the cursor names, not from a snapshot of the result set. A record
+	// whose rank changes between two pages therefore moves relative to that
+	// frozen position: it is skipped if it moves to an already-passed position
+	// and returned twice if it moves ahead of one. This is inherent to
+	// keyset pagination over a live view; a sweep that must see every record
+	// exactly once has to reconcile by identity, not by page.
 	ListRanked(ctx context.Context, namespace string, rankingScope string, after RankedCursor, limit int) (RankedPage, error)
 
 	// ListDue returns current, nondeleted DueAt records with UnixMillis no later
@@ -197,6 +216,10 @@ type OrderedIndex interface {
 	// due bound, and this exact due query. A malformed, unknown-version,
 	// wrong-kind, or query-mismatched token returns *InvalidOrderedCursorError
 	// with Kind DueCursorKind.
+	//
+	// Like ListRanked, ListDue resumes from the frozen (due_at, stable_key,
+	// ordering_scope) tuple the cursor names, so a record whose due time moves
+	// across that position between pages is skipped or returned twice.
 	ListDue(ctx context.Context, namespace string, dueAtOrBefore int64, after DueCursor, limit int) (DuePage, error)
 }
 

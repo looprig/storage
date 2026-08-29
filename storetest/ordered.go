@@ -143,8 +143,11 @@ func testOrderedIndexCreateAssignsImmutableOrder(t *testing.T, newBackend Ordere
 	if first.Revision != 1 || second.Revision != 1 {
 		t.Errorf("created revisions = (%d, %d), want (1, 1)", first.Revision, second.Revision)
 	}
-	if first.Order != 1 || second.Order != 2 {
-		t.Errorf("created orders = (%d, %d), want (1, 2)", first.Order, second.Order)
+	// The contract promises a nonzero, strictly increasing order within an order
+	// scope, never density: a provider allocating from a JetStream stream
+	// sequence or a shared SQL sequence is conforming.
+	if first.Order == 0 || second.Order <= first.Order {
+		t.Errorf("created orders = (%d, %d), want nonzero and strictly increasing", first.Order, second.Order)
 	}
 
 	updated, err := index.Update(ctx, first.ID, first.Revision, []byte("first-updated"), storage.Rank{Ranked: true, Value: 4}, storage.Due{State: storage.DueAt, UnixMillis: 4})
@@ -156,8 +159,11 @@ func testOrderedIndexCreateAssignsImmutableOrder(t *testing.T, newBackend Ordere
 	}
 
 	otherScope := mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("other", "first"), "workers", []byte("other"), storage.Rank{}, storage.Due{State: storage.NotDue})
-	if otherScope.Order != 1 {
-		t.Errorf("other ordering scope first order = %d, want 1", otherScope.Order)
+	// A fresh order scope gets its own stream, but its first order is not
+	// required to restart at 1: a provider may serve every scope from one shared
+	// sequence, so the only portable assertion is that the order is nonzero.
+	if otherScope.Order == 0 {
+		t.Errorf("other ordering scope first order = %d, want nonzero", otherScope.Order)
 	}
 }
 
@@ -269,8 +275,11 @@ func testOrderedIndexScopesIdentity(t *testing.T, newBackend OrderedIndexFactory
 	second := mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("scope-b", "shared"), "workers", []byte("b"), storage.Rank{}, storage.Due{State: storage.NotDue})
 	thirdID := storage.OrderedID{Namespace: "other", OrderingScope: "scope-a", StableKey: "shared"}
 	third := mustCreateOrderedIndexRecord(t, ctx, index, thirdID, "workers", []byte("c"), storage.Rank{}, storage.Due{State: storage.NotDue})
-	if first.Order != 1 || second.Order != 1 || third.Order != 1 {
-		t.Errorf("independent identity-scope orders = (%d, %d, %d), want (1, 1, 1)", first.Order, second.Order, third.Order)
+	// Order values are not comparable across order scopes and are not required
+	// to restart at 1 in each, so identity scoping is asserted through the
+	// records themselves below; only nonzero order is portable here.
+	if first.Order == 0 || second.Order == 0 || third.Order == 0 {
+		t.Errorf("independent identity-scope orders = (%d, %d, %d), want all nonzero", first.Order, second.Order, third.Order)
 	}
 	for _, want := range []storage.OrderedRecord{first, second, third} {
 		got := mustGetOrderedIndexRecord(t, ctx, index, want.ID)
@@ -396,11 +405,7 @@ func testOrderedIndexListOrderedPagesInAcceptanceOrder(t *testing.T, newBackend 
 	if got, want := orderedIndexRecordLabels(all), []string{"acceptance/first", "acceptance/second", "acceptance/third", "acceptance/fourth", "acceptance/fifth"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("ListOrdered labels = %v, want %v", got, want)
 	}
-	for i, record := range all {
-		if record.Order != uint64(i+1) {
-			t.Errorf("ListOrdered record %s order = %d, want %d", orderedIndexIDLabel(record.ID), record.Order, i+1)
-		}
-	}
+	requireStrictlyIncreasingOrders(t, "ListOrdered acceptance stream", all)
 	if !all[2].Deleted {
 		t.Errorf("ListOrdered terminal record %s omitted its tombstone state", orderedIndexIDLabel(all[2].ID))
 	}
@@ -653,8 +658,8 @@ func testOrderedIndexConcurrentDuplicateHasOneWinner(t *testing.T, newBackend Or
 	if winners != 1 {
 		t.Fatalf("concurrent duplicate Create(%s) winners = %d, want 1", orderedIndexIDLabel(id), winners)
 	}
-	if canonical.Order != 1 || canonical.Revision != 1 {
-		t.Errorf("concurrent duplicate winner %s has order/revision (%d, %d), want (1, 1)", orderedIndexIDLabel(id), canonical.Order, canonical.Revision)
+	if canonical.Order == 0 || canonical.Revision != 1 {
+		t.Errorf("concurrent duplicate winner %s has order/revision (%d, %d), want nonzero order and revision 1", orderedIndexIDLabel(id), canonical.Order, canonical.Revision)
 	}
 	for _, result := range allResults {
 		requireOrderedIndexRecordEqual(t, "concurrent duplicate canonical result", result.record, canonical)
@@ -712,10 +717,17 @@ func testOrderedIndexConcurrentDistinctCreatesAreMonotonic(t *testing.T, newBack
 	if len(orders) != writers {
 		t.Fatalf("concurrent distinct creates completed %d records, want %d", len(orders), writers)
 	}
+	// Sorting first turns "every concurrent create got its own order" into a
+	// strict-increase check that holds for sparse allocation too: any repeated
+	// or zero order survives the sort and fails here.
 	sort.Slice(orders, func(i int, j int) bool { return orders[i] < orders[j] })
 	for i, order := range orders {
-		if want := uint64(i + 1); order != want {
-			t.Errorf("concurrent distinct order[%d] = %d, want %d", i, order, want)
+		if order == 0 {
+			t.Errorf("concurrent distinct order[%d] = 0, want nonzero", i)
+			continue
+		}
+		if i > 0 && order <= orders[i-1] {
+			t.Errorf("concurrent distinct order[%d] = %d, want strictly greater than the preceding %d", i, order, orders[i-1])
 		}
 	}
 }
@@ -891,8 +903,10 @@ func testOrderedIndexDeletePreventsReuse(t *testing.T, newBackend OrderedIndexFa
 	requireOrderedIndexRecordEqual(t, "Get tombstone", mustGetOrderedIndexRecord(t, ctx, index, id), deleted)
 
 	next := mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("acceptance", "next"), "workers", []byte("next"), storage.Rank{}, storage.Due{State: storage.NotDue})
-	if next.Order != created.Order+1 {
-		t.Errorf("Create(after tombstone) order = %d, want %d without reuse", next.Order, created.Order+1)
+	// The tombstone keeps its order forever, so the next create must advance
+	// past it. How far it advances is the provider's business.
+	if next.Order <= created.Order {
+		t.Errorf("Create(after tombstone) order = %d, want strictly greater than the tombstone order %d without reuse", next.Order, created.Order)
 	}
 }
 
@@ -952,6 +966,23 @@ func requireOrderedIndexRecordEqual(t *testing.T, label string, got storage.Orde
 	t.Helper()
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("%s record %s differs from canonical record %s", label, orderedIndexIDLabel(got.ID), orderedIndexIDLabel(want.ID))
+	}
+}
+
+// requireStrictlyIncreasingOrders asserts the whole of what the contract says
+// about a sequence of orders read out of one order scope in acceptance order:
+// each is nonzero and strictly greater than its predecessor. It deliberately
+// does not assert density — orders may be sparse and need not start at 1.
+func requireStrictlyIncreasingOrders(t *testing.T, label string, records []storage.OrderedRecord) {
+	t.Helper()
+	for i, record := range records {
+		if record.Order == 0 {
+			t.Errorf("%s record %s order = 0, want nonzero", label, orderedIndexIDLabel(record.ID))
+			continue
+		}
+		if i > 0 && record.Order <= records[i-1].Order {
+			t.Errorf("%s record %s order = %d, want strictly greater than the preceding %s order %d", label, orderedIndexIDLabel(record.ID), record.Order, orderedIndexIDLabel(records[i-1].ID), records[i-1].Order)
+		}
 	}
 }
 
