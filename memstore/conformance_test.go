@@ -13,10 +13,11 @@ import (
 // This file runs the shared storetest backend-conformance suites against the
 // in-memory reference backend. A fresh memstore.New() per factory call yields a
 // fresh, empty primitive, so every suite subtest is fully independent. The
-// memstore-SPECIFIC behaviors the suites deliberately skip (copy-in/copy-out,
-// cursor boundedness, single-winner append contention, independent-reader, the
+// memstore-specific behaviors the shared suites deliberately skip (cursor
+// boundedness, single-winner append contention, independent-reader, the
 // reader-error branch, the acquire-contention hygiene test) live in the
-// package-internal *_test.go files alongside the implementation.
+// package-internal *_test.go files alongside the implementation. OrderedIndex
+// copy-in/copy-out ownership is covered by its shared conformance suite.
 
 func TestLedgerConformance(t *testing.T) {
 	t.Parallel()
@@ -43,9 +44,9 @@ func TestOrderedIndexConformance(t *testing.T) {
 	storetest.TestOrderedIndex(t, func(t *testing.T) storage.OrderedIndex { return memstore.New().OrderedIndex })
 }
 
-// TestOrderedIndexConformanceAllowsUndisclosedActualRevision proves the shared
-// suite accepts the contract-valid zero ActualRevision sentinel while the
-// ordinary memstore run above verifies a disclosed current revision.
+// TestOrderedIndexConformanceAllowsUndisclosedActualRevision adapts memstore to
+// verify the contract-valid undisclosed ActualRevision path. Ordinary providers
+// may report either the current revision or the undisclosed zero sentinel.
 func TestOrderedIndexConformanceAllowsUndisclosedActualRevision(t *testing.T) {
 	t.Parallel()
 	storetest.TestOrderedIndex(t, func(t *testing.T) storage.OrderedIndex {
