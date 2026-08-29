@@ -367,7 +367,7 @@ func (s *orderedStore) ListRanked(ctx context.Context, namespace string, ranking
 	if err := ctx.Err(); err != nil {
 		return storage.RankedPage{}, err
 	}
-	position, hasPosition, err := s.decodeRankedCursor(after, namespace, rankingScope)
+	position, hasPosition, err := decodeRankedCursor(after, namespace, rankingScope)
 	if err != nil {
 		return storage.RankedPage{}, err
 	}
@@ -416,7 +416,7 @@ func (s *orderedStore) ListDue(ctx context.Context, namespace string, dueAtOrBef
 	if err := ctx.Err(); err != nil {
 		return storage.DuePage{}, err
 	}
-	position, hasPosition, err := s.decodeDueCursor(after, namespace, dueAtOrBefore)
+	position, hasPosition, err := decodeDueCursor(after, namespace, dueAtOrBefore)
 	if err != nil {
 		return storage.DuePage{}, err
 	}
@@ -575,6 +575,16 @@ func removeOrderedIdentity(entries []orderedIdentity, position int) []orderedIde
 	return entries[:len(entries)-1]
 }
 
+// orderedIdentityPosition scans linearly on purpose, and is the one place this
+// store trades speed for correctness. The ranked and due slices are ordered by
+// a key derived from the CURRENT record, so a binary search would only find an
+// entry while the record still carries the rank or due time it was inserted
+// under. Removal happens during an update, in the window between reading the
+// old record and publishing the new one, and nothing in the type system pins
+// that ordering: reordering two statements in Update or Delete would leave a
+// binary search silently failing to find the entry, which corrupts the index
+// rather than erroring. A scan over identity cannot be wrong that way. Do not
+// "optimize" it.
 func orderedIdentityPosition(entries []orderedIdentity, want orderedIdentity) int {
 	for position, key := range entries {
 		if key == want {
@@ -793,7 +803,12 @@ func decodeOrderedCursorField(field string) (string, bool) {
 	return string(decoded), true
 }
 
-func (s *orderedStore) decodeRankedCursor(cursor storage.RankedCursor, namespace string, rankingScope string) (rankedCursorPosition, bool, error) {
+// decodeRankedCursor is a free function on purpose. A cursor is versioned,
+// kind tagged, and query bound, and every binding is re-checked against the
+// live request, so decoding depends on nothing in a particular store instance;
+// a method here would imply the per-process authority
+// TestOrderedCursorsAreInstanceIndependent exists to disprove.
+func decodeRankedCursor(cursor storage.RankedCursor, namespace string, rankingScope string) (rankedCursorPosition, bool, error) {
 	if cursor == "" {
 		return rankedCursorPosition{}, false, nil
 	}
@@ -811,7 +826,9 @@ func (s *orderedStore) decodeRankedCursor(cursor storage.RankedCursor, namespace
 	return position, true, nil
 }
 
-func (s *orderedStore) decodeDueCursor(cursor storage.DueCursor, namespace string, dueBound int64) (dueCursorPosition, bool, error) {
+// decodeDueCursor is a free function for the same reason as
+// decodeRankedCursor: nothing about decoding is instance dependent.
+func decodeDueCursor(cursor storage.DueCursor, namespace string, dueBound int64) (dueCursorPosition, bool, error) {
 	if cursor == "" {
 		return dueCursorPosition{}, false, nil
 	}
@@ -903,10 +920,35 @@ func cursorTokenKind(kind storage.OrderedCursorKind) string {
 	return dueCursorTokenKind
 }
 
+// noncanonicalCursorIntegerError rejects an integer cursor field whose
+// spelling this encoder would never have produced. It deliberately does not
+// name the offending field: cursor bytes are opaque and must not be echoed
+// back through an error.
+type noncanonicalCursorIntegerError struct{}
+
+func (*noncanonicalCursorIntegerError) Error() string {
+	return "memstore: noncanonical ordered cursor integer field"
+}
+
+// parseCanonicalInt64 accepts only the exact spelling strconv.FormatInt would
+// produce for the value it parses, giving each cursor position exactly one
+// token. strconv.ParseInt alone reads "+10", "010", and "10" as the same
+// number, which would let three distinct byte strings decode to one position.
+func parseCanonicalInt64(field string) (int64, error) {
+	value, err := strconv.ParseInt(field, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	if strconv.FormatInt(value, 10) != field {
+		return 0, &noncanonicalCursorIntegerError{}
+	}
+	return value, nil
+}
+
 func parseRankedCursorFields(fields []string) (rankedCursorPosition, bool) {
 	namespace, namespaceOK := decodeOrderedCursorField(fields[2])
 	rankingScope, rankingScopeOK := decodeOrderedCursorField(fields[3])
-	rank, rankErr := strconv.ParseInt(fields[4], 10, 64)
+	rank, rankErr := parseCanonicalInt64(fields[4])
 	stableKey, stableKeyOK := decodeOrderedCursorField(fields[5])
 	orderingScope, orderingScopeOK := decodeOrderedCursorField(fields[6])
 	if !namespaceOK || !rankingScopeOK || rankErr != nil || !stableKeyOK || !orderingScopeOK {
@@ -923,8 +965,8 @@ func parseRankedCursorFields(fields []string) (rankedCursorPosition, bool) {
 
 func parseDueCursorFields(fields []string) (dueCursorPosition, bool) {
 	namespace, namespaceOK := decodeOrderedCursorField(fields[2])
-	dueBound, dueBoundErr := strconv.ParseInt(fields[3], 10, 64)
-	dueAt, dueAtErr := strconv.ParseInt(fields[4], 10, 64)
+	dueBound, dueBoundErr := parseCanonicalInt64(fields[3])
+	dueAt, dueAtErr := parseCanonicalInt64(fields[4])
 	stableKey, stableKeyOK := decodeOrderedCursorField(fields[5])
 	orderingScope, orderingScopeOK := decodeOrderedCursorField(fields[6])
 	if !namespaceOK || dueBoundErr != nil || dueAtErr != nil || !stableKeyOK || !orderingScopeOK {

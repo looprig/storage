@@ -293,14 +293,10 @@ func TestOrderedRankedViewMovesAndBindsCursors(t *testing.T) {
 	if got, want := orderedScopesAndKeys(moved.Records), []string{"c/low", "acceptance/high", "b/same", "a/same"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("ListRanked(after move) = %v, want %v", got, want)
 	}
-	if _, err := index.Get(ctx, high.ID); err != nil {
-		t.Errorf("Get(high) unexpected error: %v", err)
-	}
-	if _, err := index.Get(ctx, tieA.ID); err != nil {
-		t.Errorf("Get(tieA) unexpected error: %v", err)
-	}
-	if _, err := index.Get(ctx, tieB.ID); err != nil {
-		t.Errorf("Get(tieB) unexpected error: %v", err)
+	// A rank move rewrites the ranked slice around one record; the records it
+	// steps over must come back byte for byte unchanged.
+	for _, want := range []storage.OrderedRecord{high, tieA, tieB} {
+		requireOrderedRecordUnchanged(t, ctx, index, want)
 	}
 
 	if _, err := index.ListRanked(ctx, "sessions", "other", page.NextCursor, 2); err == nil {
@@ -360,9 +356,9 @@ func TestOrderedDueViewMovesExcludesNotDueAndBindsCursors(t *testing.T) {
 	if got, want := orderedScopesAndKeys(moved.Records), []string{"acceptance/later", "acceptance/past", "b/same"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("ListDue(after moves) = %v, want %v", got, want)
 	}
-	if _, err := index.Get(ctx, past.ID); err != nil {
-		t.Errorf("Get(past) unexpected error: %v", err)
-	}
+	// past neither moved nor became not-due, so the two updates above must have
+	// left it exactly as created.
+	requireOrderedRecordUnchanged(t, ctx, index, past)
 	if _, err := index.ListDue(ctx, "sessions", 11, page.NextCursor, 2); err == nil {
 		t.Fatal("ListDue(cross-bound cursor) returned nil error, want query mismatch")
 	} else {
@@ -1067,5 +1063,70 @@ func TestOrderedMutationsRefuseToPublishInvalidRecords(t *testing.T) {
 				t.Errorf("%s(corrupt record) changed stored state: got %#v, want %#v", tt.name, stored, corrupt)
 			}
 		})
+	}
+}
+
+// TestOrderedCursorRejectsNoncanonicalIntegerFields pins one token to one
+// position. strconv.ParseInt accepts "+10" and "010" as 10, so without a
+// canonical-spelling check several distinct byte strings would decode to the
+// same cursor position. The tokens are opaque and provider-issued, so any
+// spelling this encoder would not have produced is malformed by definition.
+func TestOrderedCursorRejectsNoncanonicalIntegerFields(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	index := orderedTestIndex(t)
+
+	for _, test := range []struct {
+		name   string
+		cursor storage.RankedCursor
+	}{
+		{name: "explicit plus sign", cursor: storage.RankedCursor(encodeOrderedCursorToken(rankedCursorHeader, rankedCursorFields("+10")))},
+		{name: "leading zero", cursor: storage.RankedCursor(encodeOrderedCursorToken(rankedCursorHeader, rankedCursorFields("010")))},
+		{name: "negative zero", cursor: storage.RankedCursor(encodeOrderedCursorToken(rankedCursorHeader, rankedCursorFields("-0")))},
+		{name: "leading space", cursor: storage.RankedCursor(encodeOrderedCursorToken(rankedCursorHeader, rankedCursorFields(" 10")))},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := index.ListRanked(ctx, "sessions", "workers", test.cursor, 2)
+			if err == nil {
+				t.Fatalf("ListRanked(%q) returned nil error, want malformed", test.cursor)
+			}
+			requireCursorError(t, err, storage.RankedCursorKind, storage.OrderedCursorMalformed)
+		})
+	}
+
+	canonical := storage.RankedCursor(encodeOrderedCursorToken(rankedCursorHeader, rankedCursorFields("10")))
+	if _, err := index.ListRanked(ctx, "sessions", "workers", canonical, 2); err != nil {
+		t.Errorf("ListRanked(canonically spelled cursor) = %v, want nil", err)
+	}
+}
+
+// rankedCursorFields builds a ranked payload whose rank field carries an
+// arbitrary spelling, so a test can vary just that one field.
+func rankedCursorFields(rank string) []string {
+	return []string{
+		orderedCursorVersionField,
+		rankedCursorTokenKind,
+		encodeOrderedCursorField("sessions"),
+		encodeOrderedCursorField("workers"),
+		rank,
+		encodeOrderedCursorField("first"),
+		encodeOrderedCursorField("acceptance"),
+	}
+}
+
+// requireOrderedRecordUnchanged asserts that Get returns want unchanged, field
+// for field and byte for byte. It is the assertion for a record a test expects
+// some other record's mutation to have left alone.
+func requireOrderedRecordUnchanged(t *testing.T, ctx context.Context, index storage.OrderedIndex, want storage.OrderedRecord) {
+	t.Helper()
+
+	got, err := index.Get(ctx, want.ID)
+	if err != nil {
+		t.Fatalf("Get(%s) unexpected error: %v", want.ID.StableKey, err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Get(%s) = %#v, want the unchanged record %#v", want.ID.StableKey, got, want)
 	}
 }

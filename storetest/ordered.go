@@ -886,12 +886,19 @@ func testOrderedIndexOpaqueStableKeys(t *testing.T, newBackend OrderedIndexFacto
 	if !reflect.DeepEqual(gotKeys, keys) {
 		t.Errorf("ListOrdered(opaque stable keys) = %q, want creation-order keys %q", gotKeys, keys)
 	}
-	for _, key := range []storage.StableKey{"", storage.StableKey(strings.Repeat("k", storage.MaxStableKeyBytes+1)), storage.StableKey(string([]byte{0xff}))} {
-		id := orderedIndexID("opaque", key)
+	for _, invalidKey := range []struct {
+		label string
+		key   storage.StableKey
+	}{
+		{label: "empty", key: ""},
+		{label: "one byte past MaxStableKeyBytes", key: storage.StableKey(strings.Repeat("k", storage.MaxStableKeyBytes+1))},
+		{label: "invalid UTF-8", key: storage.StableKey(string([]byte{0xff}))},
+	} {
+		id := orderedIndexID("opaque", invalidKey.key)
 		_, created, err := index.Create(ctx, id, "workers", []byte("value"), storage.Rank{}, storage.Due{State: storage.NotDue})
 		var invalid *storage.InvalidStableKeyError
 		if !errors.As(err, &invalid) || created {
-			t.Errorf("Create(invalid stable key length %d) = created %v, err %T %v; want false, *InvalidStableKeyError", len(key), created, err, err)
+			t.Errorf("Create(invalid stable key: %s) = created %v, err %T %v; want false, *InvalidStableKeyError", invalidKey.label, created, err, err)
 		}
 	}
 }
@@ -966,12 +973,22 @@ func testOrderedIndexInvalidCursorFailsClosed(t *testing.T, newBackend OrderedIn
 	}, storage.DueCursorKind, storage.OrderedCursorUnknownVersion, unknownDue)
 }
 
-// requireProbeCursor rejects a probe that returns no token: an empty cursor
-// means "start from the beginning" and would make its fail-closed case vacuous.
+// minProbeCursorBytes is the shortest probe token the suite accepts. The
+// fail-closed assertion checks that the provider's error text does not contain
+// the token, and a one- or two-byte token appears inside ordinary error prose
+// by coincidence, turning a leak check into a false positive.
+const minProbeCursorBytes = 8
+
+// requireProbeCursor rejects a probe token the suite cannot draw a conclusion
+// from: an empty cursor means "start from the beginning", which would make its
+// fail-closed case vacuous, and a very short one defeats the no-leak check.
 func requireProbeCursor(t *testing.T, cursor string, method string, kind storage.OrderedCursorKind) string {
 	t.Helper()
 	if cursor == "" {
 		t.Fatalf("OrderedCursorProbe.%s(%s) returned an empty token, which the contract reads as an absent cursor", method, kind)
+	}
+	if len(cursor) < minProbeCursorBytes {
+		t.Fatalf("OrderedCursorProbe.%s(%s) returned a %d-byte token; return at least %d bytes so the no-leak assertion cannot match by coincidence", method, kind, len(cursor), minProbeCursorBytes)
 	}
 	return cursor
 }
