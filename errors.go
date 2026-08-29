@@ -208,9 +208,6 @@ const (
 
 	// OrderedCursorQueryMismatch reports a token bound to another query.
 	OrderedCursorQueryMismatch
-
-	// OrderedCursorExpired reports a token that is no longer valid.
-	OrderedCursorExpired
 )
 
 func (r OrderedCursorRule) String() string {
@@ -223,16 +220,13 @@ func (r OrderedCursorRule) String() string {
 		return "wrong kind"
 	case OrderedCursorQueryMismatch:
 		return "query mismatch"
-	case OrderedCursorExpired:
-		return "expired"
 	default:
 		return "invalid"
 	}
 }
 
 // InvalidOrderedCursorError reports a malformed, unknown-version, wrong-kind,
-// expired, cross-query, or otherwise unusable opaque OrderedIndex continuation
-// cursor. Kind identifies the listing operation that rejected it. Rule is a
+// or cross-query opaque OrderedIndex continuation cursor. Kind identifies the listing operation that rejected it. Rule is a
 // safe classification. CursorLength is the raw token's bounded byte length;
 // neither it nor Error exposes raw opaque cursor contents.
 type InvalidOrderedCursorError struct {

@@ -418,3 +418,26 @@ func TestInvalidOrderedCursorErrorDoesNotExposeOpaqueToken(t *testing.T) {
 		})
 	}
 }
+
+// TestOrderedCursorRuleSetMatchesContract pins the rule enumeration to the four
+// rules the frozen OrderedIndex contract defines. Any additional constant is a
+// classification providers may never produce, so the first value past
+// OrderedCursorQueryMismatch must render as an unrecognized rule.
+func TestOrderedCursorRuleSetMatchesContract(t *testing.T) {
+	t.Parallel()
+
+	want := map[OrderedCursorRule]string{
+		OrderedCursorMalformed:      "malformed",
+		OrderedCursorUnknownVersion: "unknown version",
+		OrderedCursorWrongKind:      "wrong kind",
+		OrderedCursorQueryMismatch:  "query mismatch",
+	}
+	for rule, wantString := range want {
+		if got := rule.String(); got != wantString {
+			t.Errorf("OrderedCursorRule(%d).String() = %q, want %q", rule, got, wantString)
+		}
+	}
+	if got := (OrderedCursorQueryMismatch + 1).String(); got != "invalid" {
+		t.Errorf("OrderedCursorRule(%d).String() = %q, want %q; the contract defines exactly four rules", OrderedCursorQueryMismatch+1, got, "invalid")
+	}
+}
