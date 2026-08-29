@@ -11,7 +11,8 @@
 // the standard library uses for testing/fstest.TestFS. Importing "testing" from a
 // regular file is idiomatic for this conformance-suite shape.
 //
-// Backend-specific behavior — copy-in/copy-out ownership, cursor internals,
-// cross-process lease reclaim, ctx-honoring — is deliberately out of scope and
-// stays in each backend's own tests.
+// Backend-specific behavior — cursor internals, cross-process lease reclaim,
+// and ctx-honoring — is deliberately out of scope and stays in each backend's
+// own tests. The shared OrderedIndex suite does cover its public
+// copy-in/copy-out ownership guarantees.
 package storetest
