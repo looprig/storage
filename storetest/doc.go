@@ -16,5 +16,8 @@
 // own tests. The shared OrderedIndex suite does cover its public
 // copy-in/copy-out ownership guarantees. The separate Leaser lifecycle suite
 // uses a provider-supplied, test-only harness to cover deterministic renewal
-// and expiry without expanding the production Leaser interface.
+// and expiry without expanding the production Leaser interface. For the same
+// reason the OrderedIndex suite takes malformed and unknown-version cursor
+// tokens from the provider's OrderedCursorProbe: cursor bytes are opaque, so a
+// literal token here would pin one provider's grammar as the contract.
 package storetest

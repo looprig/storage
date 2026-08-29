@@ -18,6 +18,29 @@ import (
 // subtest.
 type OrderedIndexFactory func(t *testing.T) storage.OrderedIndex
 
+// OrderedCursorProbe supplies the fail-closed cursor inputs this suite cannot
+// invent for itself. Cursor bytes are opaque and versioned, and each provider
+// owns its own encoding, so a literal token written here would test one
+// provider's grammar rather than the contract: a provider whose cursors are a
+// signed blob or a stream sequence tuple would fail a test about its own
+// format. A factory returns a provider that also implements this interface,
+// usually by wrapping its OrderedIndex in its own conformance test.
+//
+// The remaining fail-closed rules need no probe: cross-query and cross-kind
+// inputs are derived from real cursors the provider just issued.
+type OrderedCursorProbe interface {
+	// MalformedCursor returns a nonempty token the provider must reject for
+	// kind with OrderedCursorMalformed. It must be a token the provider could
+	// never have issued.
+	MalformedCursor(t *testing.T, kind storage.OrderedCursorKind) string
+
+	// UnknownVersionCursor returns a nonempty token that is well formed for the
+	// provider's encoding but carries a token version it does not support, and
+	// which it must therefore reject for kind with
+	// OrderedCursorUnknownVersion.
+	UnknownVersionCursor(t *testing.T, kind storage.OrderedCursorKind) string
+}
+
 // OrderedIndexCounters optionally asserts provider-specific query-work
 // counters against a fresh OrderedIndex under the suite's bounded context. The
 // concrete measurements are intentionally provider-owned: semantic conformance
@@ -737,6 +760,10 @@ func testOrderedIndexOpaqueStableKeys(t *testing.T, newBackend OrderedIndexFacto
 func testOrderedIndexInvalidCursorFailsClosed(t *testing.T, newBackend OrderedIndexFactory) {
 	ctx := orderedIndexContext(t)
 	index := freshOrderedIndex(t, newBackend)
+	probe, ok := index.(OrderedCursorProbe)
+	if !ok {
+		t.Fatalf("provider %T must implement storetest.OrderedCursorProbe: only the provider knows which opaque tokens are malformed or carry an unsupported version", index)
+	}
 	for _, key := range []storage.StableKey{"first", "second", "third"} {
 		mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("acceptance", key), "workers", []byte(key), storage.Rank{Ranked: true, Value: 1}, storage.Due{State: storage.DueAt, UnixMillis: 1})
 	}
@@ -745,6 +772,13 @@ func testOrderedIndexInvalidCursorFailsClosed(t *testing.T, newBackend OrderedIn
 	if err != nil || ranked.NextCursor == "" {
 		t.Fatalf("ListRanked(first page) = %d records, continuation %v, err %v; want continuation cursor", len(ranked.Records), ranked.NextCursor != "", err)
 	}
+	due, err := index.ListDue(ctx, "sessions", 1, "", 1)
+	if err != nil || due.NextCursor == "" {
+		t.Fatalf("ListDue(first page) = %d records, continuation %v, err %v; want continuation cursor", len(due.Records), due.NextCursor != "", err)
+	}
+
+	// Query mismatch: a real cursor replayed against another ranking scope,
+	// namespace, or due bound.
 	requireInvalidOrderedCursor(t, func() (int, bool, error) {
 		page, err := index.ListRanked(ctx, "sessions", "other", ranked.NextCursor, 1)
 		return len(page.Records), page.NextCursor != "", err
@@ -754,19 +788,6 @@ func testOrderedIndexInvalidCursorFailsClosed(t *testing.T, newBackend OrderedIn
 		return len(page.Records), page.NextCursor != "", err
 	}, storage.RankedCursorKind, storage.OrderedCursorQueryMismatch, string(ranked.NextCursor))
 	requireInvalidOrderedCursor(t, func() (int, bool, error) {
-		page, err := index.ListRanked(ctx, "sessions", "workers", storage.RankedCursor("ranked-token-secret"), 1)
-		return len(page.Records), page.NextCursor != "", err
-	}, storage.RankedCursorKind, storage.OrderedCursorMalformed, "ranked-token-secret")
-	requireInvalidOrderedCursor(t, func() (int, bool, error) {
-		page, err := index.ListRanked(ctx, "sessions", "workers", storage.RankedCursor("v2:r:opaque"), 1)
-		return len(page.Records), page.NextCursor != "", err
-	}, storage.RankedCursorKind, storage.OrderedCursorUnknownVersion, "v2:r:opaque")
-
-	due, err := index.ListDue(ctx, "sessions", 1, "", 1)
-	if err != nil || due.NextCursor == "" {
-		t.Fatalf("ListDue(first page) = %d records, continuation %v, err %v; want continuation cursor", len(due.Records), due.NextCursor != "", err)
-	}
-	requireInvalidOrderedCursor(t, func() (int, bool, error) {
 		page, err := index.ListDue(ctx, "sessions", 2, due.NextCursor, 1)
 		return len(page.Records), page.NextCursor != "", err
 	}, storage.DueCursorKind, storage.OrderedCursorQueryMismatch, string(due.NextCursor))
@@ -774,14 +795,8 @@ func testOrderedIndexInvalidCursorFailsClosed(t *testing.T, newBackend OrderedIn
 		page, err := index.ListDue(ctx, "other", 1, due.NextCursor, 1)
 		return len(page.Records), page.NextCursor != "", err
 	}, storage.DueCursorKind, storage.OrderedCursorQueryMismatch, string(due.NextCursor))
-	requireInvalidOrderedCursor(t, func() (int, bool, error) {
-		page, err := index.ListDue(ctx, "sessions", 1, storage.DueCursor("due-token-secret"), 1)
-		return len(page.Records), page.NextCursor != "", err
-	}, storage.DueCursorKind, storage.OrderedCursorMalformed, "due-token-secret")
-	requireInvalidOrderedCursor(t, func() (int, bool, error) {
-		page, err := index.ListDue(ctx, "sessions", 1, storage.DueCursor("v2:d:opaque"), 1)
-		return len(page.Records), page.NextCursor != "", err
-	}, storage.DueCursorKind, storage.OrderedCursorUnknownVersion, "v2:d:opaque")
+
+	// Wrong kind: a genuine cursor of the other listing family.
 	requireInvalidOrderedCursor(t, func() (int, bool, error) {
 		page, err := index.ListRanked(ctx, "sessions", "workers", storage.RankedCursor(due.NextCursor), 1)
 		return len(page.Records), page.NextCursor != "", err
@@ -790,6 +805,40 @@ func testOrderedIndexInvalidCursorFailsClosed(t *testing.T, newBackend OrderedIn
 		page, err := index.ListDue(ctx, "sessions", 1, storage.DueCursor(ranked.NextCursor), 1)
 		return len(page.Records), page.NextCursor != "", err
 	}, storage.DueCursorKind, storage.OrderedCursorWrongKind, string(ranked.NextCursor))
+
+	// Malformed and unknown-version tokens are provider-supplied: their shape
+	// is part of the provider's opaque encoding, not of this contract.
+	malformedRanked := requireProbeCursor(t, probe.MalformedCursor(t, storage.RankedCursorKind), "MalformedCursor", storage.RankedCursorKind)
+	requireInvalidOrderedCursor(t, func() (int, bool, error) {
+		page, err := index.ListRanked(ctx, "sessions", "workers", storage.RankedCursor(malformedRanked), 1)
+		return len(page.Records), page.NextCursor != "", err
+	}, storage.RankedCursorKind, storage.OrderedCursorMalformed, malformedRanked)
+	malformedDue := requireProbeCursor(t, probe.MalformedCursor(t, storage.DueCursorKind), "MalformedCursor", storage.DueCursorKind)
+	requireInvalidOrderedCursor(t, func() (int, bool, error) {
+		page, err := index.ListDue(ctx, "sessions", 1, storage.DueCursor(malformedDue), 1)
+		return len(page.Records), page.NextCursor != "", err
+	}, storage.DueCursorKind, storage.OrderedCursorMalformed, malformedDue)
+
+	unknownRanked := requireProbeCursor(t, probe.UnknownVersionCursor(t, storage.RankedCursorKind), "UnknownVersionCursor", storage.RankedCursorKind)
+	requireInvalidOrderedCursor(t, func() (int, bool, error) {
+		page, err := index.ListRanked(ctx, "sessions", "workers", storage.RankedCursor(unknownRanked), 1)
+		return len(page.Records), page.NextCursor != "", err
+	}, storage.RankedCursorKind, storage.OrderedCursorUnknownVersion, unknownRanked)
+	unknownDue := requireProbeCursor(t, probe.UnknownVersionCursor(t, storage.DueCursorKind), "UnknownVersionCursor", storage.DueCursorKind)
+	requireInvalidOrderedCursor(t, func() (int, bool, error) {
+		page, err := index.ListDue(ctx, "sessions", 1, storage.DueCursor(unknownDue), 1)
+		return len(page.Records), page.NextCursor != "", err
+	}, storage.DueCursorKind, storage.OrderedCursorUnknownVersion, unknownDue)
+}
+
+// requireProbeCursor rejects a probe that returns no token: an empty cursor
+// means "start from the beginning" and would make its fail-closed case vacuous.
+func requireProbeCursor(t *testing.T, cursor string, method string, kind storage.OrderedCursorKind) string {
+	t.Helper()
+	if cursor == "" {
+		t.Fatalf("OrderedCursorProbe.%s(%s) returned an empty token, which the contract reads as an absent cursor", method, kind)
+	}
+	return cursor
 }
 
 func testOrderedIndexLargeValueRoundTrip(t *testing.T, newBackend OrderedIndexFactory) {

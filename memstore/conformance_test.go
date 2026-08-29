@@ -41,7 +41,9 @@ func TestBlobsConformance(t *testing.T) {
 
 func TestOrderedIndexConformance(t *testing.T) {
 	t.Parallel()
-	storetest.TestOrderedIndex(t, func(t *testing.T) storage.OrderedIndex { return memstore.New().OrderedIndex })
+	storetest.TestOrderedIndex(t, func(t *testing.T) storage.OrderedIndex {
+		return orderedCursorProbeIndex{OrderedIndex: memstore.New().OrderedIndex}
+	})
 }
 
 // TestOrderedIndexConformanceAllowsUndisclosedActualRevision adapts memstore to
@@ -50,7 +52,7 @@ func TestOrderedIndexConformance(t *testing.T) {
 func TestOrderedIndexConformanceAllowsUndisclosedActualRevision(t *testing.T) {
 	t.Parallel()
 	storetest.TestOrderedIndex(t, func(t *testing.T) storage.OrderedIndex {
-		return undisclosedActualRevisionIndex{OrderedIndex: memstore.New().OrderedIndex}
+		return orderedCursorProbeIndex{OrderedIndex: undisclosedActualRevisionIndex{OrderedIndex: memstore.New().OrderedIndex}}
 	})
 }
 
@@ -74,4 +76,30 @@ func undiscloseActualRevision(err error) error {
 	undisclosed := *conflict
 	undisclosed.ActualRevision = 0
 	return &undisclosed
+}
+
+// orderedCursorProbeIndex supplies the fail-closed cursor inputs whose shape
+// belongs to this provider's opaque encoding rather than to the shared
+// contract. memstore tokens are "v<version>:<kind letter>:<encoded payload>".
+type orderedCursorProbeIndex struct {
+	storage.OrderedIndex
+}
+
+var _ storetest.OrderedCursorProbe = orderedCursorProbeIndex{}
+
+// MalformedCursor returns a token with no recognizable memstore header, which
+// this provider could never have issued.
+func (orderedCursorProbeIndex) MalformedCursor(t *testing.T, kind storage.OrderedCursorKind) string {
+	t.Helper()
+	return "memstore-" + kind.String() + "-token-secret"
+}
+
+// UnknownVersionCursor returns a token whose header is syntactically a memstore
+// cursor of a version this build does not implement.
+func (orderedCursorProbeIndex) UnknownVersionCursor(t *testing.T, kind storage.OrderedCursorKind) string {
+	t.Helper()
+	if kind == storage.RankedCursorKind {
+		return "v2:r:opaque"
+	}
+	return "v2:d:opaque"
 }
