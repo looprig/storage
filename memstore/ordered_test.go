@@ -656,6 +656,40 @@ func TestOrderedCursorRejectsOversizedSignedToken(t *testing.T) {
 	}
 }
 
+func TestOrderedStoreFormattingRedactsSecrets(t *testing.T) {
+	t.Parallel()
+
+	// Exercise the public composition path: callers receive an OrderedIndex
+	// interface whose dynamic value is the unexported orderedStore.
+	index := New().OrderedIndex
+	store, ok := index.(*orderedStore)
+	if !ok {
+		t.Fatalf("New().OrderedIndex dynamic type = %T, want *orderedStore", index)
+	}
+	for i := range store.cursorKey {
+		store.cursorKey[i] = byte(i + 1)
+	}
+	secretValue := []byte("stored-value-secret-not-for-formatting")
+	if _, created, err := index.Create(context.Background(), orderedTestID("acceptance", "formatting"), "workers", secretValue, storage.Rank{}, storage.Due{State: storage.NotDue}); err != nil || !created {
+		t.Fatalf("Create(secret record) = created %v, err %v; want true, nil", created, err)
+	}
+
+	for _, verb := range []string{"%v", "%+v", "%#v"} {
+		t.Run(verb, func(t *testing.T) {
+			rendered := fmt.Sprintf(verb, index)
+			for _, secret := range []string{
+				string(secretValue),
+				fmt.Sprintf(verb, store.cursorKey),
+				fmt.Sprintf(verb, secretValue),
+			} {
+				if strings.Contains(rendered, secret) {
+					t.Errorf("fmt.Sprintf(%q, New().OrderedIndex) leaked secret %q in %q", verb, secret, rendered)
+				}
+			}
+		})
+	}
+}
+
 type errObservedContext struct {
 	context.Context
 	errObserved chan struct{}

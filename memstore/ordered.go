@@ -110,6 +110,19 @@ type orderedStore struct {
 	cursorErr error
 }
 
+// String prevents ordinary diagnostic formatting from traversing the store's
+// private fields, which include the cursor-signing key and caller-supplied
+// record values. It intentionally reports no mutable state.
+func (*orderedStore) String() string {
+	return "memstore.orderedStore{redacted}"
+}
+
+// GoString provides the same redaction for fmt's %#v form, which otherwise
+// reflects unexported fields of the concrete value held by OrderedIndex.
+func (*orderedStore) GoString() string {
+	return "(*memstore.orderedStore)(redacted)"
+}
+
 // newOrderedStore returns an empty orderedStore. If the operating system cannot
 // supply cryptographic randomness, rank and due listing fails closed rather than
 // issuing forgeable continuation tokens; mutations and acceptance-order reads
