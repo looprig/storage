@@ -14,5 +14,7 @@
 // Backend-specific behavior — cursor internals, cross-process lease reclaim,
 // and ctx-honoring — is deliberately out of scope and stays in each backend's
 // own tests. The shared OrderedIndex suite does cover its public
-// copy-in/copy-out ownership guarantees.
+// copy-in/copy-out ownership guarantees. The separate Leaser lifecycle suite
+// uses a provider-supplied, test-only harness to cover deterministic renewal
+// and expiry without expanding the production Leaser interface.
 package storetest

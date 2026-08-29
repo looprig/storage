@@ -3,6 +3,17 @@
 `storage` is a **stdlib-only leaf module**. It defines storage contracts; it depends on
 nothing outside the Go standard library, and it must stay that way.
 
+## Public storage surface
+
+The five primitives are `Ledger` (append-only records), `Leaser` (renewable
+epoch-fenced ownership), `KV` (revision-CAS metadata), `Blobs` (immutable bulk bytes),
+and `OrderedIndex` (immutable acceptance order with ranked and due views).
+
+`NewComposite` preserves the legacy four-primitive assembly contract and intentionally
+leaves `OrderedIndex` nil; it does not synthesize an index. Consumers that require all
+five primitives use `NewCompositeWithOrderedIndex`, which rejects any missing provider.
+`memstore.New()` is the complete in-memory composite.
+
 ## Dependencies
 
 - **No third-party dependencies, ever.** There is no scenario in this module where stdlib

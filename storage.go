@@ -58,19 +58,22 @@ type Cursor interface {
 	Close() error
 }
 
-// Leaser grants exclusive, epoch-fenced ownership of a name. Acquire fails with
-// *LeaseHeldError while a live holder exists; a dead holder's lease is reclaimed
-// by the backend's native mechanism (flock released by the OS, KV TTL expiry,
-// PG advisory-lock session end). Epochs are strictly increasing across grants
-// of the same name.
+// Leaser grants renewable, exclusive, epoch-fenced ownership of a name. A
+// provider maintains and renews a live grant by its native mechanism; Lease.Lost
+// closes when it can no longer safely assert ownership, including Release,
+// expiry, or takeover. Acquire fails with *LeaseHeldError while a live holder
+// exists, and a later grant of the same name has a strictly greater epoch.
+// Acquire and Release must remain correct across independent calls: no grant
+// may depend on retaining one connection or session. Release is idempotent,
+// including after loss, and cannot free a later holder.
 type Leaser interface {
 	Acquire(ctx context.Context, name string) (Lease, error)
 }
 
 type Lease interface {
 	Epoch() uint64
-	Lost() <-chan struct{}             // closed when ownership is lost (expiry, takeover)
-	Release(ctx context.Context) error // releasing may cross the network; ctx bounds it
+	Lost() <-chan struct{}             // closed once when ownership is lost (Release, expiry, takeover)
+	Release(ctx context.Context) error // idempotent; may cross the network, so ctx bounds it
 }
 
 // KV holds small CAS'd metadata (the session catalog). Revisions are per-key,

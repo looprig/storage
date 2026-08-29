@@ -62,17 +62,20 @@ func (s *leaserStore) Acquire(ctx context.Context, name string) (storage.Lease, 
 }
 
 // memLease is a single grant of a leaserStore name. Its epoch is fixed at
-// construction; its lost channel closes exactly once, when the grant ends via
-// Release. All mutable state (the released flag, the lost channel's closure, and
-// the store's holder slot) is guarded by the parent store's mutex, so there is a
+// construction; its lost channel closes exactly once, when ownership ends. In
+// production memstore that is Release only, but the ended flag is deliberately
+// distinct from "Release was called" so a grant that ends by any other means
+// still closes Lost() exactly once and still tolerates a later stale Release.
+// All mutable state (the ended flag, the lost channel's closure, and the
+// store's holder slot) is guarded by the parent store's mutex, so there is a
 // single lock and no lock-ordering hazard.
 type memLease struct {
 	store *leaserStore
 	name  string
 	epoch uint64
 
-	lost     chan struct{} // closed on Release; reference fixed at construction
-	released bool          // guarded by store.mu
+	lost  chan struct{} // closed once when ownership ends; reference fixed at construction
+	ended bool          // ownership has ended; guarded by store.mu
 }
 
 // Epoch returns the fixed, strictly-increasing epoch stamped on this grant.
@@ -80,27 +83,26 @@ func (l *memLease) Epoch() uint64 {
 	return l.epoch
 }
 
-// Lost returns a channel closed when ownership ends. In memstore that is Release
-// only — there is no TTL or takeover — so the channel closes exactly once.
+// Lost returns a channel closed when ownership ends. In production memstore that
+// is Release only — there is no TTL or takeover — and it closes exactly once.
 func (l *memLease) Lost() <-chan struct{} {
 	return l.lost
 }
 
 // Release ends the grant: it closes Lost() and frees the name for re-acquisition
-// (the next Acquire advances the epoch). It is idempotent — a second Release is a
-// no-op returning nil. The ctx exists only to satisfy the Lease contract.
+// (the next Acquire advances the epoch). It is idempotent — a second Release, or
+// a stale Release after ownership already ended, is a no-op returning nil. It
+// frees the name only while this grant still occupies the holder slot, so a
+// stale Release can never free a later holder. The ctx exists only to satisfy
+// the Lease contract.
 func (l *memLease) Release(ctx context.Context) error {
 	l.store.mu.Lock()
 	defer l.store.mu.Unlock()
 
-	if l.released {
-		return nil // double-Release is a no-op
+	if !l.ended {
+		l.ended = true
+		close(l.lost)
 	}
-	l.released = true
-	close(l.lost)
-
-	// Free the name only if we still occupy the holder slot. memstore has no
-	// takeover, so this is always us — the guard is defensive.
 	if l.store.holders[l.name] == l {
 		delete(l.store.holders, l.name)
 	}
