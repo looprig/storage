@@ -3,6 +3,7 @@ package memstore
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"reflect"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/looprig/storage"
 )
@@ -379,6 +381,122 @@ func TestOrderedDueViewMovesExcludesNotDueAndBindsCursors(t *testing.T) {
 	}
 }
 
+func TestOrderedDeadlineWhileWaitingForLockDoesNotMutate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		call func(storage.OrderedIndex, context.Context, storage.OrderedID, storage.OrderedID, storage.OrderedRecord) error
+	}{
+		{
+			name: "get",
+			call: func(index storage.OrderedIndex, ctx context.Context, id storage.OrderedID, _ storage.OrderedID, _ storage.OrderedRecord) error {
+				_, err := index.Get(ctx, id)
+				return err
+			},
+		},
+		{
+			name: "create",
+			call: func(index storage.OrderedIndex, ctx context.Context, _ storage.OrderedID, newID storage.OrderedID, _ storage.OrderedRecord) error {
+				_, _, err := index.Create(ctx, newID, "workers", []byte("new"), storage.Rank{}, storage.Due{State: storage.NotDue})
+				return err
+			},
+		},
+		{
+			name: "update",
+			call: func(index storage.OrderedIndex, ctx context.Context, id storage.OrderedID, _ storage.OrderedID, record storage.OrderedRecord) error {
+				_, err := index.Update(ctx, id, record.Revision, []byte("changed"), storage.Rank{Ranked: true, Value: 9}, storage.Due{State: storage.DueAt, UnixMillis: 9})
+				return err
+			},
+		},
+		{
+			name: "delete",
+			call: func(index storage.OrderedIndex, ctx context.Context, id storage.OrderedID, _ storage.OrderedID, record storage.OrderedRecord) error {
+				_, err := index.Delete(ctx, id, record.Revision)
+				return err
+			},
+		},
+		{
+			name: "list ordered",
+			call: func(index storage.OrderedIndex, ctx context.Context, _ storage.OrderedID, _ storage.OrderedID, _ storage.OrderedRecord) error {
+				_, err := index.ListOrdered(ctx, "sessions", "acceptance", 0, 1)
+				return err
+			},
+		},
+		{
+			name: "list ranked",
+			call: func(index storage.OrderedIndex, ctx context.Context, _ storage.OrderedID, _ storage.OrderedID, _ storage.OrderedRecord) error {
+				_, err := index.ListRanked(ctx, "sessions", "workers", "", 1)
+				return err
+			},
+		},
+		{
+			name: "list due",
+			call: func(index storage.OrderedIndex, ctx context.Context, _ storage.OrderedID, _ storage.OrderedID, _ storage.OrderedRecord) error {
+				_, err := index.ListDue(ctx, "sessions", 10, "", 1)
+				return err
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := newOrderedStore()
+			id := orderedTestID("acceptance", "held")
+			newID := orderedTestID("acceptance", "new")
+			before := mustCreateOrdered(t, store, id, "workers", []byte("before"), storage.Rank{Ranked: true, Value: 1}, storage.Due{State: storage.DueAt, UnixMillis: 1})
+			if err := store.mu.lock(context.Background()); err != nil {
+				t.Fatalf("hold orderedStore lock: %v", err)
+			}
+
+			deadline, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer cancel()
+			ctx := &errObservedContext{Context: deadline, errObserved: make(chan struct{})}
+			result := make(chan error, 1)
+			go func() {
+				result <- tt.call(store, ctx, id, newID, before)
+			}()
+			select {
+			case <-ctx.errObserved:
+			case <-time.After(time.Second):
+				store.mu.unlock()
+				t.Fatal("method did not inspect context before waiting for the lock")
+			}
+
+			var err error
+			select {
+			case err = <-result:
+			case <-time.After(time.Second):
+				store.mu.unlock()
+				<-result
+				t.Fatal("method remained blocked after its context deadline elapsed")
+			}
+			store.mu.unlock()
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("blocked method error = %T %v, want context.DeadlineExceeded", err, err)
+			}
+
+			got, getErr := store.Get(context.Background(), id)
+			if getErr != nil {
+				t.Fatalf("Get(after deadline) unexpected error: %v", getErr)
+			}
+			if !reflect.DeepEqual(got, before) {
+				t.Errorf("deadline mutation changed record to %#v, want %#v", got, before)
+			}
+			if _, getErr := store.Get(context.Background(), newID); getErr == nil {
+				t.Error("deadline Create persisted a new record")
+			} else {
+				var target *storage.OrderedRecordNotFoundError
+				if !errors.As(getErr, &target) {
+					t.Errorf("Get(new ID) error = %T %v, want *storage.OrderedRecordNotFoundError", getErr, getErr)
+				}
+			}
+		})
+	}
+}
+
 func TestOrderedCanceledContextDoesNotMutate(t *testing.T) {
 	t.Parallel()
 
@@ -417,6 +535,150 @@ func TestOrderedCanceledContextDoesNotMutate(t *testing.T) {
 	if _, err := index.ListDue(canceled, "sessions", 0, "", 1); !errors.Is(err, context.Canceled) {
 		t.Errorf("ListDue(canceled) error = %v, want context.Canceled", err)
 	}
+}
+
+func TestOrderedCursorEntropyFailureDoesNotIssueNextCursor(t *testing.T) {
+	t.Parallel()
+
+	store := newOrderedStoreWithCursorReader(partialFailingCursorKeyReader{err: errInjectedCursorEntropy})
+	if !errors.Is(store.cursorErr, errInjectedCursorEntropy) {
+		t.Fatalf("cursor key initialization error = %v, want injected entropy failure", store.cursorErr)
+	}
+	if store.cursorKey != [sha256.Size]byte{} {
+		t.Fatal("cursor key retained partial entropy after initialization failed")
+	}
+	firstID := orderedTestID("acceptance", "first")
+	secondID := orderedTestID("acceptance", "second")
+	for _, id := range []storage.OrderedID{firstID, secondID} {
+		mustCreateOrdered(t, store, id, "workers", []byte(id.StableKey), storage.Rank{Ranked: true, Value: 1}, storage.Due{State: storage.DueAt, UnixMillis: 1})
+	}
+
+	tests := []struct {
+		name string
+		list func(*testing.T) error
+	}{
+		{
+			name: "ranked",
+			list: func(t *testing.T) error {
+				page, err := store.ListRanked(context.Background(), "sessions", "workers", "", 1)
+				if page.NextCursor != "" {
+					t.Errorf("ListRanked() issued cursor %q despite entropy failure", page.NextCursor)
+				}
+				return err
+			},
+		},
+		{
+			name: "due",
+			list: func(t *testing.T) error {
+				page, err := store.ListDue(context.Background(), "sessions", 1, "", 1)
+				if page.NextCursor != "" {
+					t.Errorf("ListDue() issued cursor %q despite entropy failure", page.NextCursor)
+				}
+				return err
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.list(t)
+			if err == nil {
+				t.Fatal("list returned nil error despite needing a continuation cursor")
+			}
+			var target *orderedCursorEntropyError
+			if !errors.As(err, &target) || !errors.Is(err, errInjectedCursorEntropy) {
+				t.Errorf("list error = %T %v, want wrapped *orderedCursorEntropyError", err, err)
+			}
+		})
+	}
+}
+
+func TestOrderedCursorRejectsOversizedSignedToken(t *testing.T) {
+	t.Parallel()
+
+	// The payloads are otherwise valid, HMAC-authenticated v1 cursors with an
+	// ignored JSON field. They prove the raw-token limit is applied before a
+	// decoder can allocate or unmarshal attacker-controlled padding.
+	const paddingBytes = 96 << 10
+	paddingMarker := "opaque-cursor-padding-"
+	padding := strings.Repeat(paddingMarker, paddingBytes/len(paddingMarker)+1)
+	store := newOrderedStore()
+
+	tests := []struct {
+		name   string
+		kind   storage.OrderedCursorKind
+		cursor string
+		list   func(string) error
+	}{
+		{
+			name:   "ranked",
+			kind:   storage.RankedCursorKind,
+			cursor: store.encodeCursor(rankedCursorHeader, []byte(fmt.Sprintf(`{"v":1,"k":"ranked","n":"sessions","s":"workers","r":0,"i":"key","o":"scope","padding":"%s"}`, padding))),
+			list: func(cursor string) error {
+				_, err := store.ListRanked(context.Background(), "sessions", "workers", storage.RankedCursor(cursor), 1)
+				return err
+			},
+		},
+		{
+			name:   "due",
+			kind:   storage.DueCursorKind,
+			cursor: store.encodeCursor(dueCursorHeader, []byte(fmt.Sprintf(`{"v":1,"k":"due","n":"sessions","b":0,"d":0,"i":"key","o":"scope","padding":"%s"}`, padding))),
+			list: func(cursor string) error {
+				_, err := store.ListDue(context.Background(), "sessions", 0, storage.DueCursor(cursor), 1)
+				return err
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if len(tt.cursor) <= 1<<16-1 {
+				t.Fatalf("test cursor length = %d, want more than bounded diagnostic capacity", len(tt.cursor))
+			}
+			err := tt.list(tt.cursor)
+			if err == nil {
+				t.Fatal("oversized signed cursor returned nil error")
+			}
+			requireCursorError(t, err, tt.kind, storage.OrderedCursorMalformed)
+			var target *storage.InvalidOrderedCursorError
+			if !errors.As(err, &target) {
+				t.Fatalf("oversized cursor error = %T %v, want *storage.InvalidOrderedCursorError", err, err)
+			}
+			if target.CursorLength != ^uint16(0) {
+				t.Errorf("oversized cursor diagnostic length = %d, want %d", target.CursorLength, ^uint16(0))
+			}
+			if strings.Contains(err.Error(), paddingMarker) || len(err.Error()) > 128 {
+				t.Errorf("oversized cursor error diagnostics were not bounded: %q", err)
+			}
+		})
+	}
+}
+
+type errObservedContext struct {
+	context.Context
+	errObserved chan struct{}
+	once        sync.Once
+}
+
+var errInjectedCursorEntropy = errors.New("injected cursor entropy failure")
+
+type partialFailingCursorKeyReader struct {
+	err error
+}
+
+func (r partialFailingCursorKeyReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, r.err
+	}
+	p[0] = 1
+	return 1, r.err
+}
+
+func (c *errObservedContext) Err() error {
+	c.once.Do(func() { close(c.errObserved) })
+	return c.Context.Err()
 }
 
 func TestOrderedConcurrentDuplicateCreateHasOneWinner(t *testing.T) {
@@ -529,11 +791,13 @@ func TestOrderedRevisionExhaustionLeavesStateUntouched(t *testing.T) {
 	id := orderedTestID("acceptance", "exhausted")
 	created := mustCreateOrdered(t, store, id, "workers", []byte("before"), storage.Rank{Ranked: true, Value: 4}, storage.Due{State: storage.DueAt, UnixMillis: 8})
 	key := orderedIdentityFor(id)
-	store.mu.Lock()
+	if err := store.mu.lock(context.Background()); err != nil {
+		t.Fatalf("hold orderedStore lock: %v", err)
+	}
 	record := store.records[key]
 	record.Revision = maxOrderedUint64
 	store.records[key] = record
-	store.mu.Unlock()
+	store.mu.unlock()
 
 	if _, err := store.Update(ctx, id, record.Revision, []byte("after"), storage.Rank{}, storage.Due{State: storage.NotDue}); err == nil {
 		t.Fatal("Update(max revision) returned nil error, want exhaustion")

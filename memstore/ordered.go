@@ -7,8 +7,8 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"strings"
-	"sync"
 
 	"github.com/looprig/storage"
 )
@@ -23,6 +23,10 @@ const (
 	dueCursorHeader    = "v1:d:"
 
 	orderedCursorMACBytes = sha256.Size
+	// maxOrderedCursorBytes is deliberately well above the largest valid
+	// cursor generated from the contract's bounded names and stable key, while
+	// keeping untrusted pre-authentication parsing allocation-bounded.
+	maxOrderedCursorBytes = 8 << 10
 	maxOrderedUint64      = ^uint64(0)
 )
 
@@ -50,13 +54,47 @@ type rankedScope struct {
 	rankingScope string
 }
 
+// contextMutex is a single-permit mutex that lets a waiter abandon lock
+// acquisition when its context ends. Unlike sync.Mutex and sync.RWMutex, its
+// wait path selects directly on ctx.Done, so orderedStore never begins a public
+// operation after the caller gave up while another operation holds the store.
+type contextMutex struct {
+	permit chan struct{}
+}
+
+func newContextMutex() contextMutex {
+	permit := make(chan struct{}, 1)
+	permit <- struct{}{}
+	return contextMutex{permit: permit}
+}
+
+func (m *contextMutex) lock(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-m.permit:
+	}
+	if err := ctx.Err(); err != nil {
+		m.unlock()
+		return err
+	}
+	return nil
+}
+
+func (m *contextMutex) unlock() {
+	m.permit <- struct{}{}
+}
+
 // orderedStore is the in-memory OrderedIndex reference provider. Its one mutex
 // protects authoritative records, scope high-water marks, and all three current
 // indexes as one linearizable state transition. The index slices contain only
 // identities; record state lives authoritatively in records and is copied out
 // before every public return.
 type orderedStore struct {
-	mu sync.RWMutex
+	mu contextMutex
 
 	records   map[orderedIdentity]storage.OrderedRecord
 	highWater map[orderedScope]uint64
@@ -77,14 +115,28 @@ type orderedStore struct {
 // issuing forgeable continuation tokens; mutations and acceptance-order reads
 // remain usable because they do not mint opaque cursors.
 func newOrderedStore() *orderedStore {
+	return newOrderedStoreWithCursorReader(rand.Reader)
+}
+
+// newOrderedStoreWithCursorReader exists only to make the otherwise
+// environment-dependent cursor-key failure path testable. Production always
+// supplies crypto/rand.Reader through newOrderedStore.
+func newOrderedStoreWithCursorReader(reader io.Reader) *orderedStore {
 	s := &orderedStore{
+		mu:        newContextMutex(),
 		records:   make(map[orderedIdentity]storage.OrderedRecord),
 		highWater: make(map[orderedScope]uint64),
 		ordered:   make(map[orderedScope][]orderedIdentity),
 		ranked:    make(map[rankedScope][]orderedIdentity),
 		due:       make(map[string][]orderedIdentity),
 	}
-	_, s.cursorErr = rand.Read(s.cursorKey[:])
+	_, s.cursorErr = io.ReadFull(reader, s.cursorKey[:])
+	if s.cursorErr != nil {
+		// Do not retain a partial key if a future caller accidentally ignores
+		// cursorErr. cursorReady still prevents signing, and clearing here makes
+		// the fail-closed invariant robust to partial entropy reads.
+		s.cursorKey = [sha256.Size]byte{}
+	}
 	return s
 }
 
@@ -102,8 +154,10 @@ func (s *orderedStore) Get(ctx context.Context, id storage.OrderedID) (storage.O
 		return storage.OrderedRecord{}, err
 	}
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	if err := s.mu.lock(ctx); err != nil {
+		return storage.OrderedRecord{}, err
+	}
+	defer s.mu.unlock()
 	if err := ctx.Err(); err != nil {
 		return storage.OrderedRecord{}, err
 	}
@@ -128,8 +182,10 @@ func (s *orderedStore) Create(ctx context.Context, id storage.OrderedID, ranking
 	}
 
 	key := orderedIdentityFor(id)
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if err := s.mu.lock(ctx); err != nil {
+		return storage.OrderedRecord{}, false, err
+	}
+	defer s.mu.unlock()
 	if err := ctx.Err(); err != nil {
 		return storage.OrderedRecord{}, false, err
 	}
@@ -174,8 +230,10 @@ func (s *orderedStore) Update(ctx context.Context, id storage.OrderedID, expecte
 	}
 
 	key := orderedIdentityFor(id)
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if err := s.mu.lock(ctx); err != nil {
+		return storage.OrderedRecord{}, err
+	}
+	defer s.mu.unlock()
 	if err := ctx.Err(); err != nil {
 		return storage.OrderedRecord{}, err
 	}
@@ -223,8 +281,10 @@ func (s *orderedStore) Delete(ctx context.Context, id storage.OrderedID, expecte
 	}
 
 	key := orderedIdentityFor(id)
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if err := s.mu.lock(ctx); err != nil {
+		return storage.OrderedRecord{}, err
+	}
+	defer s.mu.unlock()
 	if err := ctx.Err(); err != nil {
 		return storage.OrderedRecord{}, err
 	}
@@ -272,8 +332,10 @@ func (s *orderedStore) ListOrdered(ctx context.Context, namespace string, orderi
 		return storage.OrderedPage{}, err
 	}
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	if err := s.mu.lock(ctx); err != nil {
+		return storage.OrderedPage{}, err
+	}
+	defer s.mu.unlock()
 	if err := ctx.Err(); err != nil {
 		return storage.OrderedPage{}, err
 	}
@@ -320,8 +382,10 @@ func (s *orderedStore) ListRanked(ctx context.Context, namespace string, ranking
 		return storage.RankedPage{}, err
 	}
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	if err := s.mu.lock(ctx); err != nil {
+		return storage.RankedPage{}, err
+	}
+	defer s.mu.unlock()
 	if err := ctx.Err(); err != nil {
 		return storage.RankedPage{}, err
 	}
@@ -371,8 +435,10 @@ func (s *orderedStore) ListDue(ctx context.Context, namespace string, dueAtOrBef
 		return storage.DuePage{}, err
 	}
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	if err := s.mu.lock(ctx); err != nil {
+		return storage.DuePage{}, err
+	}
+	defer s.mu.unlock()
 	if err := ctx.Err(); err != nil {
 		return storage.DuePage{}, err
 	}
@@ -697,6 +763,9 @@ func dueEndAtOrBefore(records map[orderedIdentity]storage.OrderedRecord, entries
 }
 
 func (s *orderedStore) encodeRankedCursor(position rankedCursorPosition) (storage.RankedCursor, error) {
+	if err := s.cursorReady(); err != nil {
+		return "", err
+	}
 	payload, err := json.Marshal(rankedCursorPayload{
 		cursorEnvelope: cursorEnvelope{Version: orderedCursorVersion, Kind: rankedCursorTokenKind},
 		Namespace:      position.namespace,
@@ -712,6 +781,9 @@ func (s *orderedStore) encodeRankedCursor(position rankedCursorPosition) (storag
 }
 
 func (s *orderedStore) encodeDueCursor(position dueCursorPosition) (storage.DueCursor, error) {
+	if err := s.cursorReady(); err != nil {
+		return "", err
+	}
 	payload, err := json.Marshal(dueCursorPayload{
 		cursorEnvelope: cursorEnvelope{Version: orderedCursorVersion, Kind: dueCursorTokenKind},
 		Namespace:      position.namespace,
@@ -772,8 +844,11 @@ func (s *orderedStore) decodeDueCursor(cursor storage.DueCursor, namespace strin
 }
 
 func (s *orderedStore) decodeCursor(kind storage.OrderedCursorKind, cursor string) ([]byte, error) {
-	if s.cursorErr != nil {
-		return nil, &orderedCursorEntropyError{cause: s.cursorErr}
+	if len(cursor) > maxOrderedCursorBytes {
+		return nil, storage.NewInvalidOrderedCursorError(kind, cursor, storage.OrderedCursorMalformed)
+	}
+	if err := s.cursorReady(); err != nil {
+		return nil, err
 	}
 	expectedHeader := cursorHeader(kind)
 	if hasUnsupportedCursorVersion(cursor) {
@@ -816,6 +891,15 @@ func (s *orderedStore) decodeCursor(kind storage.OrderedCursorKind, cursor strin
 		return nil, storage.NewInvalidOrderedCursorError(kind, cursor, storage.OrderedCursorWrongKind)
 	}
 	return payload, nil
+}
+
+// cursorReady prevents opaque cursor issuance and verification after the
+// provider failed to obtain a complete cryptographic key at construction.
+func (s *orderedStore) cursorReady() error {
+	if s.cursorErr != nil {
+		return &orderedCursorEntropyError{cause: s.cursorErr}
+	}
+	return nil
 }
 
 // hasUnsupportedCursorVersion recognizes the version prefix before decoding a
