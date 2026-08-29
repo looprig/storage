@@ -42,8 +42,8 @@ func TestBlobsConformance(t *testing.T) {
 func TestOrderedIndexConformance(t *testing.T) {
 	t.Parallel()
 	storetest.TestOrderedIndex(t, func(t *testing.T) storage.OrderedIndex {
-		return orderedCursorProbeIndex{OrderedIndex: memstore.New().OrderedIndex}
-	})
+		return memstore.New().OrderedIndex
+	}, memstoreCursorProbe{})
 }
 
 // TestOrderedIndexConformanceAllowsUndisclosedActualRevision adapts memstore to
@@ -51,8 +51,8 @@ func TestOrderedIndexConformance(t *testing.T) {
 // may report either the current revision or the undisclosed zero sentinel.
 func TestOrderedIndexConformanceAllowsUndisclosedActualRevision(t *testing.T) {
 	t.Parallel()
-	storetest.TestOrderedIndex(t, func(t *testing.T) storage.OrderedIndex {
-		return orderedCursorProbeIndex{OrderedIndex: undisclosedActualRevisionIndex{OrderedIndex: memstore.New().OrderedIndex}}
+	storetest.TestOrderedIndexRevisionConflicts(t, func(t *testing.T) storage.OrderedIndex {
+		return undisclosedActualRevisionIndex{OrderedIndex: memstore.New().OrderedIndex}
 	})
 }
 
@@ -78,25 +78,23 @@ func undiscloseActualRevision(err error) error {
 	return &undisclosed
 }
 
-// orderedCursorProbeIndex supplies the fail-closed cursor inputs whose shape
+// memstoreCursorProbe supplies the fail-closed cursor inputs whose shape
 // belongs to this provider's opaque encoding rather than to the shared
 // contract. memstore tokens are "v<version>:<kind letter>:<encoded payload>".
-type orderedCursorProbeIndex struct {
-	storage.OrderedIndex
-}
+type memstoreCursorProbe struct{}
 
-var _ storetest.OrderedCursorProbe = orderedCursorProbeIndex{}
+var _ storetest.OrderedCursorProbe = memstoreCursorProbe{}
 
 // MalformedCursor returns a token with no recognizable memstore header, which
 // this provider could never have issued.
-func (orderedCursorProbeIndex) MalformedCursor(t *testing.T, kind storage.OrderedCursorKind) string {
+func (memstoreCursorProbe) MalformedCursor(t *testing.T, kind storage.OrderedCursorKind) string {
 	t.Helper()
 	return "memstore-" + kind.String() + "-token-secret"
 }
 
 // UnknownVersionCursor returns a token whose header is syntactically a memstore
 // cursor of a version this build does not implement.
-func (orderedCursorProbeIndex) UnknownVersionCursor(t *testing.T, kind storage.OrderedCursorKind) string {
+func (memstoreCursorProbe) UnknownVersionCursor(t *testing.T, kind storage.OrderedCursorKind) string {
 	t.Helper()
 	if kind == storage.RankedCursorKind {
 		return "v2:r:opaque"
@@ -114,8 +112,8 @@ func (orderedCursorProbeIndex) UnknownVersionCursor(t *testing.T, kind storage.O
 func TestOrderedIndexConformanceAllowsSparseOrders(t *testing.T) {
 	t.Parallel()
 	storetest.TestOrderedIndex(t, func(t *testing.T) storage.OrderedIndex {
-		return orderedCursorProbeIndex{OrderedIndex: sparseOrderIndex{OrderedIndex: memstore.New().OrderedIndex}}
-	})
+		return sparseOrderIndex{OrderedIndex: memstore.New().OrderedIndex}
+	}, memstoreCursorProbe{})
 }
 
 // sparseOrderStride spaces this adapter's acceptance orders apart. Multiplying

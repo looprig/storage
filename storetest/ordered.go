@@ -64,14 +64,26 @@ func (f OrderedIndexCounterFunc) Assert(t *testing.T, ctx context.Context, index
 }
 
 // TestOrderedIndex runs the provider-neutral OrderedIndex conformance suite.
+//
 // newBackend must return a fresh, empty provider and may register cleanup with
 // t.Cleanup. Every test receives a bounded context and reports record identity
-// on failures so remote providers can use the same suite safely. counters is
-// optional and, when provided, runs one provider-defined bounded-work check on
-// another fresh provider.
-func TestOrderedIndex(t *testing.T, newBackend OrderedIndexFactory, counters ...OrderedIndexCounters) {
+// on failures so remote providers can use the same suite safely.
+//
+// probe is REQUIRED. Malformed and unknown-version cursor tokens are the two
+// fail-closed inputs the suite cannot invent, because cursor bytes are opaque
+// and each provider owns its encoding; a provider supplies them through
+// OrderedCursorProbe. It is a parameter rather than an optional interface the
+// provider might also implement so that omitting it is a compile error at the
+// conformance test rather than a failure from inside one subtest.
+//
+// counters is optional and, when provided, runs one provider-defined
+// bounded-work check on another fresh provider.
+func TestOrderedIndex(t *testing.T, newBackend OrderedIndexFactory, probe OrderedCursorProbe, counters ...OrderedIndexCounters) {
 	if newBackend == nil {
 		t.Fatal("TestOrderedIndex requires a non-nil factory")
+	}
+	if probe == nil {
+		t.Fatal("TestOrderedIndex requires a non-nil OrderedCursorProbe: only the provider knows which opaque tokens are malformed or carry an unsupported version")
 	}
 	if len(counters) > 1 {
 		t.Fatal("TestOrderedIndex accepts at most one optional counter assertion")
@@ -91,6 +103,9 @@ func TestOrderedIndex(t *testing.T, newBackend OrderedIndexFactory, counters ...
 	})
 	t.Run("TestOrderedIndexWrongRevisionLeavesStateUntouched", func(t *testing.T) {
 		testOrderedIndexWrongRevisionLeavesStateUntouched(t, newBackend)
+	})
+	t.Run("TestOrderedIndexRejectsInvalidListArguments", func(t *testing.T) {
+		testOrderedIndexRejectsInvalidListArguments(t, newBackend)
 	})
 	t.Run("TestOrderedIndexListOrderedPagesInAcceptanceOrder", func(t *testing.T) {
 		testOrderedIndexListOrderedPagesInAcceptanceOrder(t, newBackend)
@@ -120,7 +135,7 @@ func TestOrderedIndex(t *testing.T, newBackend OrderedIndexFactory, counters ...
 		testOrderedIndexOpaqueStableKeys(t, newBackend)
 	})
 	t.Run("TestOrderedIndexInvalidCursorFailsClosed", func(t *testing.T) {
-		testOrderedIndexInvalidCursorFailsClosed(t, newBackend)
+		testOrderedIndexInvalidCursorFailsClosed(t, newBackend, probe)
 	})
 	t.Run("TestOrderedIndexLargeValueRoundTrip", func(t *testing.T) {
 		testOrderedIndexLargeValueRoundTrip(t, newBackend)
@@ -133,6 +148,21 @@ func TestOrderedIndex(t *testing.T, newBackend OrderedIndexFactory, counters ...
 			counters[0].Assert(t, orderedIndexContext(t), freshOrderedIndex(t, newBackend))
 		})
 	}
+}
+
+// TestOrderedIndexRevisionConflicts runs only the CAS-conflict conformance
+// case. It exists for the provider adapter that varies one narrow reporting
+// choice the contract leaves open — whether *OrderedRevisionConflictError
+// discloses ActualRevision or reports the zero sentinel — so verifying that
+// branch costs one subtest instead of a second full suite run. It needs no
+// cursor probe because it never lists.
+func TestOrderedIndexRevisionConflicts(t *testing.T, newBackend OrderedIndexFactory) {
+	if newBackend == nil {
+		t.Fatal("TestOrderedIndexRevisionConflicts requires a non-nil factory")
+	}
+	t.Run("TestOrderedIndexWrongRevisionLeavesStateUntouched", func(t *testing.T) {
+		testOrderedIndexWrongRevisionLeavesStateUntouched(t, newBackend)
+	})
 }
 
 func testOrderedIndexCreateAssignsImmutableOrder(t *testing.T, newBackend OrderedIndexFactory) {
@@ -350,6 +380,103 @@ func testOrderedIndexWrongRevisionLeavesStateUntouched(t *testing.T, newBackend 
 	_, err = index.Delete(ctx, absent, 99)
 	if !errors.As(err, &notFound) || notFound.ID != absent {
 		t.Errorf("Delete(absent %s) = %T %v, want *OrderedRecordNotFoundError", orderedIndexIDLabel(absent), err, err)
+	}
+}
+
+// testOrderedIndexRejectsInvalidListArguments covers the listing side of
+// boundary validation. ValidateOrderedLimit and ValidateName are documented
+// rules of all three List methods, and a provider that clamped limit 0 to a
+// default, accepted a limit past MaxOrderedPageLimit, or let an ungrammatical
+// namespace through to its backend would otherwise pass the entire suite.
+func testOrderedIndexRejectsInvalidListArguments(t *testing.T, newBackend OrderedIndexFactory) {
+	ctx := orderedIndexContext(t)
+	index := freshOrderedIndex(t, newBackend)
+	mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("acceptance", "listed"), "workers", []byte("listed"), storage.Rank{Ranked: true, Value: 1}, storage.Due{State: storage.DueAt, UnixMillis: 1})
+
+	// Each listing is reduced to the same shape — record count, continuation,
+	// error — so one table can cover all three methods.
+	listings := []struct {
+		name string
+		call func(namespace string, limit int) (int, bool, error)
+	}{
+		{name: "ListOrdered", call: func(namespace string, limit int) (int, bool, error) {
+			page, err := index.ListOrdered(ctx, namespace, "acceptance", 0, limit)
+			return len(page.Records), page.NextAfterOrder != 0, err
+		}},
+		{name: "ListRanked", call: func(namespace string, limit int) (int, bool, error) {
+			page, err := index.ListRanked(ctx, namespace, "workers", "", limit)
+			return len(page.Records), page.NextCursor != "", err
+		}},
+		{name: "ListDue", call: func(namespace string, limit int) (int, bool, error) {
+			page, err := index.ListDue(ctx, namespace, 1, "", limit)
+			return len(page.Records), page.NextCursor != "", err
+		}},
+	}
+	limits := []struct {
+		label string
+		limit int
+	}{
+		{label: "zero", limit: 0},
+		{label: "negative", limit: -1},
+		{label: "above maximum", limit: storage.MaxOrderedPageLimit + 1},
+	}
+	for _, listing := range listings {
+		for _, limit := range limits {
+			t.Run(listing.name+" limit "+limit.label, func(t *testing.T) {
+				records, hasNext, err := listing.call("sessions", limit.limit)
+				var invalidLimit *storage.InvalidOrderedLimitError
+				if !errors.As(err, &invalidLimit) {
+					t.Fatalf("%s(limit=%d) = %T %v, want *InvalidOrderedLimitError", listing.name, limit.limit, err, err)
+				}
+				if invalidLimit.Limit != limit.limit {
+					t.Errorf("%s(limit=%d) reported limit %d", listing.name, limit.limit, invalidLimit.Limit)
+				}
+				if records != 0 || hasNext {
+					t.Errorf("%s(limit=%d) returned %d records with continuation %v, want a fail-closed empty page", listing.name, limit.limit, records, hasNext)
+				}
+			})
+		}
+		for _, name := range invalidNames {
+			t.Run(listing.name+" namespace "+name.label, func(t *testing.T) {
+				records, hasNext, err := listing.call(name.value, 1)
+				var invalidName *storage.InvalidNameError
+				if !errors.As(err, &invalidName) {
+					t.Fatalf("%s(namespace=%q) = %T %v, want *InvalidNameError", listing.name, name.value, err, err)
+				}
+				if records != 0 || hasNext {
+					t.Errorf("%s(namespace=%q) returned %d records with continuation %v, want a fail-closed empty page", listing.name, name.value, records, hasNext)
+				}
+			})
+		}
+	}
+
+	// The scope arguments carry the same grammar as the namespace, and only
+	// ListOrdered and ListRanked take one.
+	for _, scope := range []struct {
+		name string
+		call func(scope string) (int, bool, error)
+	}{
+		{name: "ListOrdered orderingScope", call: func(scope string) (int, bool, error) {
+			page, err := index.ListOrdered(ctx, "sessions", scope, 0, 1)
+			return len(page.Records), page.NextAfterOrder != 0, err
+		}},
+		{name: "ListRanked rankingScope", call: func(scope string) (int, bool, error) {
+			page, err := index.ListRanked(ctx, "sessions", scope, "", 1)
+			return len(page.Records), page.NextCursor != "", err
+		}},
+	} {
+		for _, name := range invalidNames {
+			t.Run(scope.name+" "+name.label, func(t *testing.T) {
+				records, hasNext, err := scope.call(name.value)
+				var invalidName *storage.InvalidNameError
+				if !errors.As(err, &invalidName) {
+					t.Fatalf("%s(%q) = %T %v, want *InvalidNameError", scope.name, name.value, err, err)
+				}
+				if records != 0 || hasNext {
+					t.Errorf("%s(%q) returned %d records with continuation %v, want a fail-closed empty page", scope.name, name.value, records, hasNext)
+				}
+			})
+		}
 	}
 }
 
@@ -769,13 +896,9 @@ func testOrderedIndexOpaqueStableKeys(t *testing.T, newBackend OrderedIndexFacto
 	}
 }
 
-func testOrderedIndexInvalidCursorFailsClosed(t *testing.T, newBackend OrderedIndexFactory) {
+func testOrderedIndexInvalidCursorFailsClosed(t *testing.T, newBackend OrderedIndexFactory, probe OrderedCursorProbe) {
 	ctx := orderedIndexContext(t)
 	index := freshOrderedIndex(t, newBackend)
-	probe, ok := index.(OrderedCursorProbe)
-	if !ok {
-		t.Fatalf("provider %T must implement storetest.OrderedCursorProbe: only the provider knows which opaque tokens are malformed or carry an unsupported version", index)
-	}
 	for _, key := range []storage.StableKey{"first", "second", "third"} {
 		mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("acceptance", key), "workers", []byte(key), storage.Rank{Ranked: true, Value: 1}, storage.Due{State: storage.DueAt, UnixMillis: 1})
 	}

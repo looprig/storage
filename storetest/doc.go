@@ -18,6 +18,8 @@
 // uses a provider-supplied, test-only harness to cover deterministic renewal
 // and expiry without expanding the production Leaser interface. For the same
 // reason the OrderedIndex suite takes malformed and unknown-version cursor
-// tokens from the provider's OrderedCursorProbe: cursor bytes are opaque, so a
-// literal token here would pin one provider's grammar as the contract.
+// tokens from a required OrderedCursorProbe parameter: cursor bytes are
+// opaque, so a literal token here would pin one provider's grammar as the
+// contract, and making the probe a parameter turns "this provider owes the
+// suite two tokens" into a compile error rather than a runtime failure.
 package storetest
