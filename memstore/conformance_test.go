@@ -1,6 +1,8 @@
 package memstore_test
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/looprig/storage"
@@ -39,4 +41,36 @@ func TestBlobsConformance(t *testing.T) {
 func TestOrderedIndexConformance(t *testing.T) {
 	t.Parallel()
 	storetest.TestOrderedIndex(t, func(t *testing.T) storage.OrderedIndex { return memstore.New().OrderedIndex })
+}
+
+// TestOrderedIndexConformanceAllowsUndisclosedActualRevision proves the shared
+// suite accepts the contract-valid zero ActualRevision sentinel while the
+// ordinary memstore run above verifies a disclosed current revision.
+func TestOrderedIndexConformanceAllowsUndisclosedActualRevision(t *testing.T) {
+	t.Parallel()
+	storetest.TestOrderedIndex(t, func(t *testing.T) storage.OrderedIndex {
+		return undisclosedActualRevisionIndex{OrderedIndex: memstore.New().OrderedIndex}
+	})
+}
+
+type undisclosedActualRevisionIndex struct{ storage.OrderedIndex }
+
+func (index undisclosedActualRevisionIndex) Update(ctx context.Context, id storage.OrderedID, expectedRevision uint64, value []byte, rank storage.Rank, due storage.Due) (storage.OrderedRecord, error) {
+	record, err := index.OrderedIndex.Update(ctx, id, expectedRevision, value, rank, due)
+	return record, undiscloseActualRevision(err)
+}
+
+func (index undisclosedActualRevisionIndex) Delete(ctx context.Context, id storage.OrderedID, expectedRevision uint64) (storage.OrderedRecord, error) {
+	record, err := index.OrderedIndex.Delete(ctx, id, expectedRevision)
+	return record, undiscloseActualRevision(err)
+}
+
+func undiscloseActualRevision(err error) error {
+	var conflict *storage.OrderedRevisionConflictError
+	if !errors.As(err, &conflict) {
+		return err
+	}
+	undisclosed := *conflict
+	undisclosed.ActualRevision = 0
+	return &undisclosed
 }

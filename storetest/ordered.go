@@ -143,8 +143,8 @@ func testOrderedIndexDuplicateReturnsOriginal(t *testing.T, newBackend OrderedIn
 	index := freshOrderedIndex(t, newBackend)
 	id := orderedIndexID("acceptance", "duplicate")
 	input := []byte("original-value")
-	wantValue := append([]byte(nil), input...)
 	first := mustCreateOrderedIndexRecord(t, ctx, index, id, "workers", input, storage.Rank{Ranked: true, Value: 8}, storage.Due{State: storage.DueAt, UnixMillis: 80})
+	wantFirst := copyOrderedIndexRecord(first)
 
 	input[0] = 'X'
 	first.Value[0] = 'Y'
@@ -152,14 +152,12 @@ func testOrderedIndexDuplicateReturnsOriginal(t *testing.T, newBackend OrderedIn
 	if err != nil || created {
 		t.Fatalf("duplicate Create(%s) = created %v, err %v; want false, nil", orderedIndexIDLabel(id), created, err)
 	}
-	if duplicate.Revision != 1 || duplicate.Order != 1 || duplicate.Rank != (storage.Rank{Ranked: true, Value: 8}) || duplicate.Due != (storage.Due{State: storage.DueAt, UnixMillis: 80}) || !bytes.Equal(duplicate.Value, wantValue) {
-		t.Errorf("duplicate Create(%s) = %s, want original canonical record", orderedIndexIDLabel(id), orderedIndexRecordSummary(duplicate))
-	}
+	requireOrderedIndexRecordEqual(t, "duplicate Create canonical record", duplicate, wantFirst)
 	duplicate.Value[0] = 'Z'
 	got := mustGetOrderedIndexRecord(t, ctx, index, id)
-	if !bytes.Equal(got.Value, wantValue) {
-		t.Errorf("Get(%s).Value = %q, want original bytes after caller mutation", orderedIndexIDLabel(id), got.Value)
-	}
+	requireOrderedIndexRecordEqual(t, "Get after caller mutations of Create input and outputs", got, wantFirst)
+	got.Value[0] = 'Q'
+	requireOrderedIndexRecordEqual(t, "Get after caller mutation of Get output", mustGetOrderedIndexRecord(t, ctx, index, id), wantFirst)
 
 	invalidID := storage.OrderedID{Namespace: "Sessions", OrderingScope: "acceptance", StableKey: "duplicate"}
 	_, created, err = index.Create(ctx, invalidID, "workers", []byte("value"), storage.Rank{}, storage.Due{State: storage.NotDue})
@@ -264,18 +262,23 @@ func testOrderedIndexCASUpdateChangesValueRankAndDueAtomically(t *testing.T, new
 	index := freshOrderedIndex(t, newBackend)
 	id := orderedIndexID("acceptance", "atomic")
 	created := mustCreateOrderedIndexRecord(t, ctx, index, id, "workers", []byte("before"), storage.Rank{Ranked: true, Value: 1}, storage.Due{State: storage.DueAt, UnixMillis: 10})
-	wantValue := []byte("after")
+	updateInput := []byte("after")
+	wantValue := append([]byte(nil), updateInput...)
 	wantRank := storage.Rank{Ranked: true, Value: 99}
 	wantDue := storage.Due{State: storage.DueAt, UnixMillis: -5}
-	updated, err := index.Update(ctx, id, created.Revision, wantValue, wantRank, wantDue)
+	updated, err := index.Update(ctx, id, created.Revision, updateInput, wantRank, wantDue)
 	if err != nil {
 		t.Fatalf("Update(%s): %v", orderedIndexIDLabel(id), err)
 	}
-	if updated.Revision != created.Revision+1 || updated.Order != created.Order || updated.ID != created.ID || updated.RankingScope != created.RankingScope || updated.Rank != wantRank || updated.Due != wantDue || !bytes.Equal(updated.Value, wantValue) {
-		t.Errorf("Update(%s) = %s, want one atomic revision/value/rank/due change", orderedIndexIDLabel(id), orderedIndexRecordSummary(updated))
-	}
+	wantUpdated := copyOrderedIndexRecord(created)
+	wantUpdated.Revision++
+	wantUpdated.Value = wantValue
+	wantUpdated.Rank = wantRank
+	wantUpdated.Due = wantDue
+	updateInput[0] = 'X'
+	requireOrderedIndexRecordEqual(t, "Update atomic result", updated, wantUpdated)
 	got := mustGetOrderedIndexRecord(t, ctx, index, id)
-	requireOrderedIndexRecordEqual(t, "Get after atomic Update", got, updated)
+	requireOrderedIndexRecordEqual(t, "Get after caller mutation of Update input", got, wantUpdated)
 
 	tooLarge := make([]byte, storage.MaxOrderedValueBytes+1)
 	_, err = index.Update(ctx, id, created.Revision, tooLarge, storage.Rank{}, storage.Due{State: storage.NotDue})
@@ -283,12 +286,13 @@ func testOrderedIndexCASUpdateChangesValueRankAndDueAtomically(t *testing.T, new
 	if !errors.As(err, &tooLargeErr) {
 		t.Errorf("Update(%s, stale+invalid candidate) = %T %v, want *OrderedValueTooLargeError before revision conflict", orderedIndexIDLabel(id), err, err)
 	}
-	requireOrderedIndexRecordEqual(t, "Get after rejected stale+invalid Update", mustGetOrderedIndexRecord(t, ctx, index, id), updated)
+	requireOrderedIndexRecordEqual(t, "Get after rejected stale+invalid Update", mustGetOrderedIndexRecord(t, ctx, index, id), wantUpdated)
 
 	updated.Value[0] = 'X'
-	if got = mustGetOrderedIndexRecord(t, ctx, index, id); !bytes.Equal(got.Value, wantValue) {
-		t.Errorf("returned Update value aliases stored bytes for %s", orderedIndexIDLabel(id))
-	}
+	got = mustGetOrderedIndexRecord(t, ctx, index, id)
+	requireOrderedIndexRecordEqual(t, "Get after caller mutation of Update output", got, wantUpdated)
+	got.Value[0] = 'Y'
+	requireOrderedIndexRecordEqual(t, "Get after caller mutation of Get output", mustGetOrderedIndexRecord(t, ctx, index, id), wantUpdated)
 }
 
 func testOrderedIndexWrongRevisionLeavesStateUntouched(t *testing.T, newBackend OrderedIndexFactory) {
@@ -298,19 +302,11 @@ func testOrderedIndexWrongRevisionLeavesStateUntouched(t *testing.T, newBackend 
 	created := mustCreateOrderedIndexRecord(t, ctx, index, id, "workers", []byte("before"), storage.Rank{Ranked: true, Value: 7}, storage.Due{State: storage.DueAt, UnixMillis: 7})
 
 	_, err := index.Update(ctx, id, created.Revision+1, []byte("after"), storage.Rank{Ranked: true, Value: 8}, storage.Due{State: storage.DueAt, UnixMillis: 8})
-	var conflict *storage.OrderedRevisionConflictError
-	if !errors.As(err, &conflict) {
-		t.Fatalf("Update(%s, stale revision) = %T %v, want *OrderedRevisionConflictError", orderedIndexIDLabel(id), err, err)
-	}
-	if conflict.ID != id || conflict.ExpectedRevision != created.Revision+1 || conflict.ActualRevision != created.Revision {
-		t.Errorf("Update(%s, stale revision) conflict = %#v, want ID and expected/actual revisions", orderedIndexIDLabel(id), conflict)
-	}
+	requireOrderedRevisionConflict(t, "Update", err, id, created.Revision+1, created.Revision)
 	requireOrderedIndexRecordEqual(t, "Get after stale Update", mustGetOrderedIndexRecord(t, ctx, index, id), created)
 
 	_, err = index.Delete(ctx, id, created.Revision+1)
-	if !errors.As(err, &conflict) {
-		t.Fatalf("Delete(%s, stale revision) = %T %v, want *OrderedRevisionConflictError", orderedIndexIDLabel(id), err, err)
-	}
+	requireOrderedRevisionConflict(t, "Delete", err, id, created.Revision+1, created.Revision)
 	requireOrderedIndexRecordEqual(t, "Get after stale Delete", mustGetOrderedIndexRecord(t, ctx, index, id), created)
 
 	absent := orderedIndexID("acceptance", "absent")
@@ -328,6 +324,7 @@ func testOrderedIndexWrongRevisionLeavesStateUntouched(t *testing.T, newBackend 
 func testOrderedIndexListOrderedPagesInAcceptanceOrder(t *testing.T, newBackend OrderedIndexFactory) {
 	ctx := orderedIndexContext(t)
 	index := freshOrderedIndex(t, newBackend)
+	const limit = 2
 	ids := []storage.OrderedID{
 		orderedIndexID("acceptance", "first"),
 		orderedIndexID("acceptance", "second"),
@@ -346,9 +343,12 @@ func testOrderedIndexListOrderedPagesInAcceptanceOrder(t *testing.T, newBackend 
 	var all []storage.OrderedRecord
 	after := uint64(0)
 	for pageNumber := 0; pageNumber < 4; pageNumber++ {
-		page, err := index.ListOrdered(ctx, "sessions", "acceptance", after, 2)
+		page, err := index.ListOrdered(ctx, "sessions", "acceptance", after, limit)
 		if err != nil {
 			t.Fatalf("ListOrdered(after=%d): %v", after, err)
+		}
+		if len(page.Records) > limit {
+			t.Errorf("ListOrdered(after=%d, limit=%d) returned %d records, want no more than limit", after, limit, len(page.Records))
 		}
 		if len(page.Records) == 0 {
 			if page.NextAfterOrder != 0 {
@@ -521,26 +521,42 @@ func testOrderedIndexNotDueNeverAppearsInDuePages(t *testing.T, newBackend Order
 func testOrderedIndexTerminalRecordsDoNotFillPages(t *testing.T, newBackend OrderedIndexFactory) {
 	ctx := orderedIndexContext(t)
 	index := freshOrderedIndex(t, newBackend)
-	tombstoned := mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("acceptance", "tombstone"), "workers", []byte("terminal"), storage.Rank{Ranked: true, Value: 100}, storage.Due{State: storage.DueAt, UnixMillis: 1})
+	deleteInput := []byte("terminal")
+	target := mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("acceptance", "tombstone"), "workers", deleteInput, storage.Rank{Ranked: true, Value: 100}, storage.Due{State: storage.DueAt, UnixMillis: 1})
+	wantLive := copyOrderedIndexRecord(target)
+	deleteInput[0] = 'X'
+	target.Value[0] = 'Y'
+	liveGet := mustGetOrderedIndexRecord(t, ctx, index, target.ID)
+	requireOrderedIndexRecordEqual(t, "Get after caller mutations of Create input and output", liveGet, wantLive)
+	liveGet.Value[0] = 'Z'
+	requireOrderedIndexRecordEqual(t, "Get after caller mutation of live Get output", mustGetOrderedIndexRecord(t, ctx, index, target.ID), wantLive)
 	firstLive := mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("acceptance", "first-live"), "workers", []byte("first"), storage.Rank{Ranked: true, Value: 20}, storage.Due{State: storage.DueAt, UnixMillis: 2})
 	mustCreateOrderedIndexRecord(t, ctx, index, orderedIndexID("acceptance", "second-live"), "workers", []byte("second"), storage.Rank{Ranked: true, Value: 10}, storage.Due{State: storage.DueAt, UnixMillis: 3})
 
-	deleted, err := index.Delete(ctx, tombstoned.ID, tombstoned.Revision)
+	deleted, err := index.Delete(ctx, target.ID, target.Revision)
 	if err != nil {
-		t.Fatalf("Delete(%s): %v", orderedIndexIDLabel(tombstoned.ID), err)
+		t.Fatalf("Delete(%s): %v", orderedIndexIDLabel(target.ID), err)
 	}
-	if !deleted.Deleted || deleted.Rank != (storage.Rank{}) || deleted.Due != (storage.Due{State: storage.NotDue}) || !bytes.Equal(deleted.Value, tombstoned.Value) {
-		t.Errorf("Delete(%s) = %s, want canonical terminal record", orderedIndexIDLabel(tombstoned.ID), orderedIndexRecordSummary(deleted))
-	}
-	retry, err := index.Delete(ctx, tombstoned.ID, tombstoned.Revision)
+	wantDeleted := copyOrderedIndexRecord(wantLive)
+	wantDeleted.Revision++
+	wantDeleted.Deleted = true
+	wantDeleted.Rank = storage.Rank{}
+	wantDeleted.Due = storage.Due{State: storage.NotDue}
+	requireOrderedIndexRecordEqual(t, "Delete canonical tombstone", deleted, wantDeleted)
+	deleted.Value[0] = 'D'
+	deletedGet := mustGetOrderedIndexRecord(t, ctx, index, target.ID)
+	requireOrderedIndexRecordEqual(t, "Get after caller mutation of Delete output", deletedGet, wantDeleted)
+	deletedGet.Value[0] = 'G'
+	requireOrderedIndexRecordEqual(t, "Get after caller mutation of tombstone Get output", mustGetOrderedIndexRecord(t, ctx, index, target.ID), wantDeleted)
+	retry, err := index.Delete(ctx, target.ID, target.Revision)
 	if err != nil {
-		t.Fatalf("Delete retry(%s): %v", orderedIndexIDLabel(tombstoned.ID), err)
+		t.Fatalf("Delete retry(%s): %v", orderedIndexIDLabel(target.ID), err)
 	}
-	requireOrderedIndexRecordEqual(t, "Delete retry", retry, deleted)
-	_, err = index.Update(ctx, tombstoned.ID, 0, make([]byte, storage.MaxOrderedValueBytes+1), storage.Rank{}, storage.Due{State: storage.NotDue, UnixMillis: 1})
+	requireOrderedIndexRecordEqual(t, "Delete retry", retry, wantDeleted)
+	_, err = index.Update(ctx, target.ID, 0, make([]byte, storage.MaxOrderedValueBytes+1), storage.Rank{}, storage.Due{State: storage.NotDue, UnixMillis: 1})
 	var deletedErr *storage.OrderedDeletedError
-	if !errors.As(err, &deletedErr) || deletedErr.ID != tombstoned.ID {
-		t.Errorf("Update(tombstone %s) = %T %v, want *OrderedDeletedError before candidate validation", orderedIndexIDLabel(tombstoned.ID), err, err)
+	if !errors.As(err, &deletedErr) || deletedErr.ID != target.ID {
+		t.Errorf("Update(tombstone %s) = %T %v, want *OrderedDeletedError before candidate validation", orderedIndexIDLabel(target.ID), err, err)
 	}
 
 	ranked, err := index.ListRanked(ctx, "sessions", "workers", "", 1)
@@ -627,9 +643,10 @@ func testOrderedIndexConcurrentDistinctCreatesAreMonotonic(t *testing.T, newBack
 	index := freshOrderedIndex(t, newBackend)
 	const writers = 100
 	type result struct {
-		record  storage.OrderedRecord
-		created bool
-		err     error
+		attemptedID storage.OrderedID
+		record      storage.OrderedRecord
+		created     bool
+		err         error
 	}
 	results := make(chan result, writers)
 	start := make(chan struct{})
@@ -641,7 +658,7 @@ func testOrderedIndexConcurrentDistinctCreatesAreMonotonic(t *testing.T, newBack
 			<-start
 			id := orderedIndexID("acceptance", storage.StableKey(fmt.Sprintf("key-%03d", i)))
 			record, created, err := index.Create(ctx, id, "workers", []byte("value"), storage.Rank{}, storage.Due{State: storage.NotDue})
-			results <- result{record: record, created: created, err: err}
+			results <- result{attemptedID: id, record: record, created: created, err: err}
 		}(i)
 	}
 	close(start)
@@ -660,7 +677,11 @@ func testOrderedIndexConcurrentDistinctCreatesAreMonotonic(t *testing.T, newBack
 	orders := make([]uint64, 0, writers)
 	for result := range results {
 		if result.err != nil || !result.created {
-			t.Errorf("concurrent distinct Create(%s) = created %v, err %v; want true, nil", orderedIndexIDLabel(result.record.ID), result.created, result.err)
+			t.Errorf("concurrent distinct Create(%s) = created %v, err %v; want true, nil", orderedIndexIDLabel(result.attemptedID), result.created, result.err)
+			continue
+		}
+		if result.record.ID != result.attemptedID {
+			t.Errorf("concurrent distinct Create(%s) returned record for %s", orderedIndexIDLabel(result.attemptedID), orderedIndexIDLabel(result.record.ID))
 			continue
 		}
 		orders = append(orders, result.record.Order)
@@ -864,11 +885,30 @@ func mustGetOrderedIndexRecord(t *testing.T, ctx context.Context, index storage.
 	return record
 }
 
+func requireOrderedRevisionConflict(t *testing.T, operation string, err error, id storage.OrderedID, expectedRevision uint64, currentRevision uint64) {
+	t.Helper()
+	var conflict *storage.OrderedRevisionConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("%s(%s, stale revision) = %T %v, want *OrderedRevisionConflictError", operation, orderedIndexIDLabel(id), err, err)
+	}
+	if conflict.ID != id || conflict.ExpectedRevision != expectedRevision {
+		t.Errorf("%s(%s, stale revision) conflict = %#v, want ID %s and expected revision %d", operation, orderedIndexIDLabel(id), conflict, orderedIndexIDLabel(id), expectedRevision)
+	}
+	if conflict.ActualRevision != 0 && conflict.ActualRevision != currentRevision {
+		t.Errorf("%s(%s, stale revision) actual revision = %d, want undisclosed 0 or current revision %d", operation, orderedIndexIDLabel(id), conflict.ActualRevision, currentRevision)
+	}
+}
+
 func requireOrderedIndexRecordEqual(t *testing.T, label string, got storage.OrderedRecord, want storage.OrderedRecord) {
 	t.Helper()
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("%s record %s differs from canonical record %s", label, orderedIndexIDLabel(got.ID), orderedIndexIDLabel(want.ID))
 	}
+}
+
+func copyOrderedIndexRecord(record storage.OrderedRecord) storage.OrderedRecord {
+	record.Value = append([]byte(nil), record.Value...)
+	return record
 }
 
 func orderedIndexRecordLabels(records []storage.OrderedRecord) []string {
