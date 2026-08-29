@@ -800,13 +800,36 @@ func TestOrderedLargeValueAndListingSnapshotsAreCallerOwned(t *testing.T) {
 	}
 }
 
-func FuzzOrderedCursorRejectsMalformedTokens(f *testing.F) {
+// FuzzOrderedCursorParserRejectsUntrustedTokens drives the untrusted-cursor
+// parser with arbitrary bytes. Each generated input is tried bare AND behind
+// each of the two real cursor headers, because a token that does not start with
+// a header is rejected at the very first check: prefixing is what makes the
+// base64 payload decode, the field-count split, the version field, the kind
+// field, and both position parsers reachable at all.
+func FuzzOrderedCursorParserRejectsUntrustedTokens(f *testing.F) {
+	// A genuine payload from each encoder seeds the corpus, so the fuzzer starts
+	// from inputs that reach the deepest parser and mutates outward from there.
+	rankedSeed := strings.TrimPrefix(string(encodeRankedCursor(rankedCursorPosition{
+		namespace:     "sessions",
+		rankingScope:  "workers",
+		rank:          10,
+		stableKey:     "first",
+		orderingScope: "acceptance",
+	})), rankedCursorHeader)
+	dueSeed := strings.TrimPrefix(string(encodeDueCursor(dueCursorPosition{
+		namespace:     "sessions",
+		dueBound:      0,
+		dueAt:         -1,
+		stableKey:     "first",
+		orderingScope: "acceptance",
+	})), dueCursorHeader)
 	for _, seed := range []string{
 		"",
 		"not-a-cursor",
-		"v1:r:",
-		"v1:d:cGF5bG9hZA",
-		"v13:r:opaque",
+		"cGF5bG9hZA",
+		"opaque",
+		rankedSeed,
+		dueSeed,
 		strings.Repeat("opaque-token-", 128),
 	} {
 		f.Add(seed)
@@ -815,15 +838,16 @@ func FuzzOrderedCursorRejectsMalformedTokens(f *testing.F) {
 	store := newOrderedStore()
 	ctx := context.Background()
 	f.Fuzz(func(t *testing.T, token string) {
-		opaqueToken := "looprig-fuzz-opaque-token:" + token
-		assertFuzzCursorOutcome(t, opaqueToken, func() error {
-			_, err := store.ListRanked(ctx, "sessions", "workers", storage.RankedCursor(opaqueToken), 1)
-			return err
-		})
-		assertFuzzCursorOutcome(t, opaqueToken, func() error {
-			_, err := store.ListDue(ctx, "sessions", 0, storage.DueCursor(opaqueToken), 1)
-			return err
-		})
+		for _, candidate := range []string{token, rankedCursorHeader + token, dueCursorHeader + token} {
+			assertFuzzCursorOutcome(t, candidate, func() (int, error) {
+				page, err := store.ListRanked(ctx, "sessions", "workers", storage.RankedCursor(candidate), 1)
+				return len(page.Records), err
+			})
+			assertFuzzCursorOutcome(t, candidate, func() (int, error) {
+				page, err := store.ListDue(ctx, "sessions", 0, storage.DueCursor(candidate), 1)
+				return len(page.Records), err
+			})
+		}
 	})
 }
 
@@ -892,19 +916,35 @@ func assertRankedCursorRejectedWithoutLeak(t *testing.T, index storage.OrderedIn
 	}
 }
 
-func assertFuzzCursorOutcome(t *testing.T, token string, list func() error) {
+// minDistinctiveCursorToken is the shortest token for which "the error text
+// contains the token" is evidence of a leak rather than a coincidence. A
+// one-byte token like "a" occurs inside "malformed" by accident, so a shorter
+// token cannot distinguish echoing from ordinary English prose.
+const minDistinctiveCursorToken = 8
+
+// assertFuzzCursorOutcome pins the only two outcomes the untrusted-cursor
+// parser may produce for arbitrary bytes. Acceptance is one of them: the fuzzer
+// can and does construct well-formed, query-matching tokens, and decoding one
+// is correct behavior, not a finding. The other is a typed
+// *storage.InvalidOrderedCursorError. Any other error type is a parser defect,
+// as is any panic (which fails the fuzz target outright). A rejection must
+// never echo the token back, and must fail closed with no records.
+func assertFuzzCursorOutcome(t *testing.T, token string, list func() (int, error)) {
 	t.Helper()
 
-	err := list()
+	records, err := list()
 	if err == nil {
-		t.Fatalf("malformed cursor %q returned nil error", token)
+		return
 	}
 	var target *storage.InvalidOrderedCursorError
 	if !errors.As(err, &target) {
-		t.Fatalf("cursor %q returned %T %v, want *storage.InvalidOrderedCursorError", token, err, err)
+		t.Fatalf("cursor %q returned %T %v, want nil or *storage.InvalidOrderedCursorError", token, err, err)
 	}
-	if token != "" && strings.Contains(err.Error(), token) {
+	if len(token) >= minDistinctiveCursorToken && strings.Contains(err.Error(), token) {
 		t.Errorf("cursor error = %q, must not expose opaque token %q", err, token)
+	}
+	if records != 0 {
+		t.Errorf("rejected cursor %q returned %d records, want a fail-closed empty page", token, records)
 	}
 }
 
