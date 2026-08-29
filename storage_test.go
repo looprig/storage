@@ -265,3 +265,48 @@ func TestNewCompositeWithOrderedIndex(t *testing.T) {
 		})
 	}
 }
+
+func TestCompositeRequireOrderedIndex(t *testing.T) {
+	t.Parallel()
+
+	oi := &stubOrderedIndex{}
+	tests := []struct {
+		name        string
+		composite   *Composite
+		want        OrderedIndex
+		wantMissing []string
+	}{
+		{name: "present", composite: &Composite{OrderedIndex: oi}, want: oi},
+		{name: "absent", composite: &Composite{}, wantMissing: []string{"OrderedIndex"}},
+		{name: "nil composite", composite: nil, wantMissing: []string{"OrderedIndex"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := tt.composite.RequireOrderedIndex()
+
+			if tt.wantMissing == nil {
+				if err != nil {
+					t.Fatalf("RequireOrderedIndex() unexpected error: %v", err)
+				}
+				if got != tt.want {
+					t.Errorf("RequireOrderedIndex() = %#v, want %#v", got, tt.want)
+				}
+				return
+			}
+
+			if got != nil {
+				t.Errorf("RequireOrderedIndex() = %#v, want nil on error", got)
+			}
+			var ice *IncompleteCompositeError
+			if !errors.As(err, &ice) {
+				t.Fatalf("RequireOrderedIndex() error = %T %v, want *IncompleteCompositeError", err, err)
+			}
+			if !reflect.DeepEqual(ice.Missing, tt.wantMissing) {
+				t.Errorf("Missing = %v, want exactly %v", ice.Missing, tt.wantMissing)
+			}
+		})
+	}
+}

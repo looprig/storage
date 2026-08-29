@@ -100,13 +100,28 @@ type Blobs interface {
 // Composite holds the storage primitives assembled where dependencies are
 // wired, never inside engines. OrderedIndex remains a named field rather than
 // an embedded primitive because Ledger, KV, and Blobs already have colliding
-// method names when promoted together.
+// method names when promoted together. OrderedIndex is the one field that may
+// be nil — NewComposite leaves it so — which is what RequireOrderedIndex is
+// for.
 type Composite struct {
 	Ledger
 	Leaser
 	KV
 	Blobs
 	OrderedIndex OrderedIndex
+}
+
+// RequireOrderedIndex returns the composite's OrderedIndex, or
+// *IncompleteCompositeError naming it as missing. NewComposite deliberately
+// leaves the field nil, so any consumer that needs ordered records has to
+// check; this gives that check one typed, non-panicking form instead of an
+// ad-hoc nil comparison at each use site. A nil *Composite is treated as a
+// composite that has no ordered index rather than dereferenced.
+func (c *Composite) RequireOrderedIndex() (OrderedIndex, error) {
+	if c == nil || c.OrderedIndex == nil {
+		return nil, &IncompleteCompositeError{Missing: []string{"OrderedIndex"}}
+	}
+	return c.OrderedIndex, nil
 }
 
 // IncompleteCompositeError reports that NewComposite or
