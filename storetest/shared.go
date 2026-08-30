@@ -15,16 +15,21 @@ import (
 // payloads are the engine's responsibility to offload to Blobs.
 const payloadFloor = 1 << 20
 
-// conformanceTimeout is a whole-run stall guard, not a per-interaction budget:
-// one context bounds every provider interaction the suite function that created
-// it makes, so a case doing a hundred creates gets this much time in total. It
-// exists so a wedged remote backend fails its own suite instead of hanging the
-// test binary — a stalled call under an unbounded context takes the entire
-// package down with "test timed out", naming nothing. It is deliberately
-// generous: the OrderedIndex suite runs two hundred concurrent creates in one
-// case, which against a containerized JetStream or Postgres is legitimately
-// slow, and a stall guard that fires on a slow-but-working backend is worse
-// than none.
+// conformanceTimeout is the standard whole-run provider-operation stall guard,
+// not a per-interaction budget: one context bounds every context-aware provider
+// interaction the suite function that created it makes, so a case doing a
+// hundred creates gets this much time in total. Most suites also use that
+// context deadline as their final observation deadline. BlobReaderLifecycle is
+// the finite exception: its setup calls still receive this bounded context, but
+// Read and Close do not accept a context, so its timing observer may wait through
+// a distinct watchdog to classify a captured completion time independently of
+// delayed result publication. The guard exists so a wedged remote backend fails
+// its own suite instead of hanging the test binary — a stalled call under an
+// unbounded context takes the entire package down with "test timed out", naming
+// nothing. It is deliberately generous: the OrderedIndex suite runs two hundred
+// concurrent creates in one case, which
+// against a containerized JetStream or Postgres is legitimately slow, and a
+// stall guard that fires on a slow-but-working backend is worse than none.
 const conformanceTimeout = 30 * time.Second
 
 // conformanceContext returns the bounded context a suite runs under, cancelled

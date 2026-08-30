@@ -188,13 +188,16 @@ func lifecycleLimit(ctx context.Context, started time.Time, bound time.Duration)
 	return timedLimit{deadline: deadline, exceeded: waitBoundExceeded}
 }
 
-// lifecycleWatchdog is an observation guard distinct from the operation
-// limit. Results may be published after the operation deadline and are judged
-// by their captured completion timestamp. A missing publication gets one full
-// conformance timeout beyond that deadline before the suite declares a stall.
-// Publication after the watchdog is intentionally a stall even if its captured
-// timestamp claims an earlier completion; no finite observer can distinguish
-// that from a goroutine that will never publish.
+// lifecycleWatchdog is the finite exception to the shared conformance context
+// being the final observation cutoff. Lifecycle Read and Close do not accept a
+// context; they are measured against the earlier of the advertised provider
+// bound and shared context deadline. Results may be published after that
+// effective deadline and are judged by their captured completion timestamp. A
+// missing publication gets one full conformance timeout beyond the deadline
+// before the suite declares a stall. Publication after the watchdog is
+// intentionally a stall even if its captured timestamp claims an earlier
+// completion; no finite observer can distinguish that from a goroutine that will
+// never publish.
 func lifecycleWatchdog(ctx context.Context, limit timedLimit) (context.Context, context.CancelFunc) {
 	return context.WithDeadline(context.WithoutCancel(ctx), limit.deadline.Add(conformanceTimeout))
 }
