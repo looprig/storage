@@ -97,9 +97,9 @@ func TestBlobReaderLifecycle(t *testing.T, newBackend func(t *testing.T) storage
 		firstCloseCall := beginClose(rc, &closeReturned)
 		closeStarted := receiveBeforeContext(t, ctx, firstCloseCall.started, "first Close invocation")
 		close(resume)
-		deadline := lifecycleDeadline(ctx, closeStarted, b.BlobReaderCloseBound())
-		firstClose := receiveBefore(t, ctx, firstCloseCall.result, deadline, "first Close")
-		readErr := receiveBefore(t, ctx, result, deadline, "active Read")
+		limit := lifecycleLimit(ctx, closeStarted, b.BlobReaderCloseBound())
+		firstClose := receiveBefore(t, ctx, firstCloseCall.result, limit, "first Close")
+		readErr := receiveBefore(t, ctx, result, limit, "active Read")
 		if errors.Is(readErr, errReadSucceededAfterClose) {
 			t.Fatal(readErr)
 		}
@@ -136,6 +136,11 @@ type timedResult[T any] struct {
 	finishedAt time.Time
 }
 
+type timedLimit struct {
+	deadline time.Time
+	exceeded waitOutcome
+}
+
 type waitOutcome uint8
 
 const (
@@ -148,6 +153,9 @@ func beginTimedCall[T any](call func() T) timedCall[T] {
 	started := make(chan time.Time, 1)
 	result := make(chan timedResult[T], 1)
 	go func() {
+		// This is the closest observable point before invocation. A goroutine can
+		// still be descheduled between this timestamp and call(); that scheduling
+		// delay is conservatively charged to the provider's advertised bound.
 		started <- time.Now()
 		value := call()
 		result <- timedResult[T]{value: value, finishedAt: time.Now()}
@@ -169,60 +177,80 @@ func closeWithin(t *testing.T, ctx context.Context, rc io.ReadCloser, bound time
 	t.Helper()
 	call := beginClose(rc, nil)
 	started := receiveBeforeContext(t, ctx, call.started, "Close invocation")
-	return receiveBefore(t, ctx, call.result, lifecycleDeadline(ctx, started, bound), "Close")
+	return receiveBefore(t, ctx, call.result, lifecycleLimit(ctx, started, bound), "Close")
 }
 
-func lifecycleDeadline(ctx context.Context, started time.Time, bound time.Duration) time.Time {
+func lifecycleLimit(ctx context.Context, started time.Time, bound time.Duration) timedLimit {
 	deadline := started.Add(bound)
-	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
-		return contextDeadline
+	if contextDeadline, ok := ctx.Deadline(); ok && !contextDeadline.After(deadline) {
+		return timedLimit{deadline: contextDeadline, exceeded: waitContextEnded}
 	}
-	return deadline
+	return timedLimit{deadline: deadline, exceeded: waitBoundExceeded}
+}
+
+// lifecycleWatchdog is an observation guard distinct from the operation
+// limit. Results may be published after the operation deadline and are judged
+// by their captured completion timestamp. A missing publication gets one full
+// conformance timeout beyond that deadline before the suite declares a stall.
+// Publication after the watchdog is intentionally a stall even if its captured
+// timestamp claims an earlier completion; no finite observer can distinguish
+// that from a goroutine that will never publish.
+func lifecycleWatchdog(ctx context.Context, limit timedLimit) (context.Context, context.CancelFunc) {
+	return context.WithDeadline(context.WithoutCancel(ctx), limit.deadline.Add(conformanceTimeout))
 }
 
 func receiveBeforeContext(t *testing.T, ctx context.Context, result <-chan time.Time, operation string) time.Time {
 	t.Helper()
-	started, ok := waitStart(ctx, result)
-	if ok {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatalf("%s has no conformance deadline", operation)
+	}
+	limit := timedLimit{deadline: deadline, exceeded: waitContextEnded}
+	watchdog, cancel := lifecycleWatchdog(ctx, limit)
+	defer cancel()
+	started, outcome := waitStart(watchdog, result, limit)
+	if outcome == waitSucceeded {
 		return started
 	}
 	t.Fatalf("%s did not occur within the conformance timeout", operation)
 	return time.Time{}
 }
 
-func waitStart(ctx context.Context, result <-chan time.Time) (time.Time, bool) {
-	classify := func(started time.Time) (time.Time, bool) {
-		if deadline, ok := ctx.Deadline(); ok && started.After(deadline) {
-			return started, false
+func waitStart(watchdog context.Context, result <-chan time.Time, limit timedLimit) (time.Time, waitOutcome) {
+	classify := func(started time.Time) (time.Time, waitOutcome) {
+		if started.After(limit.deadline) {
+			return started, limit.exceeded
 		}
-		return started, true
+		return started, waitSucceeded
 	}
-	ready := func() (time.Time, bool, bool) {
+	ready := func() (time.Time, waitOutcome, bool) {
 		select {
 		case started := <-result:
-			classified, ok := classify(started)
-			return classified, ok, true
+			classified, outcome := classify(started)
+			return classified, outcome, true
 		default:
-			return time.Time{}, false, false
+			return time.Time{}, waitSucceeded, false
 		}
 	}
-	if started, ok, received := ready(); received {
-		return started, ok
+	if started, outcome, received := ready(); received {
+		return started, outcome
 	}
 	select {
 	case started := <-result:
 		return classify(started)
-	case <-ctx.Done():
-		if started, ok, received := ready(); received {
-			return started, ok
+	case <-watchdog.Done():
+		if started, outcome, received := ready(); received {
+			return started, outcome
 		}
-		return time.Time{}, false
+		return time.Time{}, limit.exceeded
 	}
 }
 
-func receiveBefore[T any](t *testing.T, ctx context.Context, result <-chan timedResult[T], deadline time.Time, operation string) T {
+func receiveBefore[T any](t *testing.T, ctx context.Context, result <-chan timedResult[T], limit timedLimit, operation string) T {
 	t.Helper()
-	timed, outcome := waitTimedResult(ctx, result, deadline)
+	watchdog, cancel := lifecycleWatchdog(ctx, limit)
+	defer cancel()
+	timed, outcome := waitTimedResult(watchdog, result, limit)
 	switch outcome {
 	case waitSucceeded:
 		return timed.value
@@ -235,10 +263,10 @@ func receiveBefore[T any](t *testing.T, ctx context.Context, result <-chan timed
 	return zero
 }
 
-func waitTimedResult[T any](ctx context.Context, result <-chan timedResult[T], deadline time.Time) (timedResult[T], waitOutcome) {
+func waitTimedResult[T any](watchdog context.Context, result <-chan timedResult[T], limit timedLimit) (timedResult[T], waitOutcome) {
 	classify := func(timed timedResult[T]) (timedResult[T], waitOutcome) {
-		if timed.finishedAt.After(deadline) {
-			return timed, waitBoundExceeded
+		if timed.finishedAt.After(limit.deadline) {
+			return timed, limit.exceeded
 		}
 		return timed, waitSucceeded
 	}
@@ -255,28 +283,15 @@ func waitTimedResult[T any](ctx context.Context, result <-chan timedResult[T], d
 	if timed, outcome, ok := ready(); ok {
 		return timed, outcome
 	}
-	remaining := time.Until(deadline)
-	if remaining <= 0 {
-		var zero timedResult[T]
-		return zero, waitBoundExceeded
-	}
-	timer := time.NewTimer(remaining)
-	defer timer.Stop()
 	select {
 	case timed := <-result:
 		return classify(timed)
-	case <-ctx.Done():
+	case <-watchdog.Done():
 		if timed, outcome, ok := ready(); ok {
 			return timed, outcome
 		}
 		var zero timedResult[T]
-		return zero, waitContextEnded
-	case <-timer.C:
-		if timed, outcome, ok := ready(); ok {
-			return timed, outcome
-		}
-		var zero timedResult[T]
-		return zero, waitBoundExceeded
+		return zero, limit.exceeded
 	}
 }
 
@@ -296,7 +311,7 @@ func requirePostCloseReads(t *testing.T, ctx context.Context, rc io.Reader, boun
 			return readResult{n: n, err: err}
 		})
 		started := receiveBeforeContext(t, ctx, call.started, "post-Close Read invocation")
-		result := receiveBefore(t, ctx, call.result, lifecycleDeadline(ctx, started, bound), "post-Close Read")
+		result := receiveBefore(t, ctx, call.result, lifecycleLimit(ctx, started, bound), "post-Close Read")
 		n, err := result.n, result.err
 		if n != 0 || err == nil || errors.Is(err, io.EOF) {
 			t.Fatalf("Read after Close call %d = %d, %v; want 0 and non-EOF error", i, n, err)
