@@ -101,6 +101,15 @@ type blobReader struct {
 	data   []byte
 	offset int
 	closed bool
+
+	// testHooks is nil for every reader returned by Get. Package tests use it
+	// only to prove the lifecycle mutex serializes an active Read with Close.
+	testHooks *blobReaderTestHooks
+}
+
+type blobReaderTestHooks struct {
+	readLocked   func()
+	closeEntered func()
 }
 
 var _ io.ReadCloser = (*blobReader)(nil)
@@ -108,6 +117,9 @@ var _ io.ReadCloser = (*blobReader)(nil)
 func (r *blobReader) Read(p []byte) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.testHooks != nil && r.testHooks.readLocked != nil {
+		r.testHooks.readLocked()
+	}
 	if r.closed {
 		return 0, fs.ErrClosed
 	}
@@ -123,6 +135,9 @@ func (r *blobReader) Read(p []byte) (int, error) {
 }
 
 func (r *blobReader) Close() error {
+	if r.testHooks != nil && r.testHooks.closeEntered != nil {
+		r.testHooks.closeEntered()
+	}
 	r.mu.Lock()
 	r.closed = true
 	r.mu.Unlock()

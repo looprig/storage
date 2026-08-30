@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"testing"
 	"testing/iotest"
+	"time"
 
 	"github.com/looprig/storage"
 )
@@ -190,4 +191,62 @@ func TestBlobGetReaderBoundsWorkPerRead(t *testing.T) {
 	if n, err := rc.Read(p[:1]); n != 0 || !errors.Is(err, fs.ErrClosed) {
 		t.Fatalf("Read after Close = %d, %v; want 0, fs.ErrClosed", n, err)
 	}
+}
+
+func TestBlobReaderCloseWaitsForActiveRead(t *testing.T) {
+	t.Parallel()
+
+	readLocked := make(chan struct{})
+	releaseRead := make(chan struct{})
+	closeEntered := make(chan struct{})
+	r := &blobReader{
+		data: []byte("active read"),
+		testHooks: &blobReaderTestHooks{
+			readLocked: func() {
+				close(readLocked)
+				<-releaseRead
+			},
+			closeEntered: func() { close(closeEntered) },
+		},
+	}
+
+	readDone := make(chan readResult, 1)
+	go func() {
+		var p [1]byte
+		n, err := r.Read(p[:])
+		readDone <- readResult{n: n, err: err}
+	}()
+	<-readLocked
+
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- r.Close() }()
+	<-closeEntered
+	select {
+	case err := <-closeResult:
+		t.Fatalf("Close returned while Read held the lifecycle lock: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	close(releaseRead)
+	select {
+	case got := <-readDone:
+		if got.n != 1 || got.err != nil {
+			t.Fatalf("active Read = %d, %v; want 1, nil", got.n, got.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("active Read did not return after release")
+	}
+	select {
+	case err := <-closeResult:
+		if err != nil {
+			t.Fatalf("Close = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not return after active Read completed")
+	}
+}
+
+type readResult struct {
+	n   int
+	err error
 }
