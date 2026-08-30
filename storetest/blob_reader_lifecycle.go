@@ -59,7 +59,7 @@ func TestBlobReaderLifecycle(t *testing.T, newBackend func(t *testing.T) storage
 
 		started := make(chan struct{})
 		resume := make(chan struct{})
-		result := make(chan error, 1)
+		result := make(chan timedResult[error], 1)
 		var closeReturned atomic.Bool
 		go func() {
 			first := true
@@ -75,11 +75,11 @@ func TestBlobReaderLifecycle(t *testing.T, newBackend func(t *testing.T) storage
 					}
 				}
 				if beganAfterClose && n > 0 {
-					result <- errReadSucceededAfterClose
+					result <- timedResult[error]{value: errReadSucceededAfterClose, finishedAt: time.Now()}
 					return
 				}
 				if readErr != nil {
-					result <- readErr
+					result <- timedResult[error]{value: readErr, finishedAt: time.Now()}
 					return
 				}
 			}
@@ -90,8 +90,8 @@ func TestBlobReaderLifecycle(t *testing.T, newBackend func(t *testing.T) storage
 			t.Fatal("initial Read did not return within the conformance timeout")
 		}
 		select {
-		case readErr := <-result:
-			t.Fatalf("read loop terminated before Close: %v", readErr)
+		case readResult := <-result:
+			t.Fatalf("read loop terminated before Close: %v", readResult.value)
 		default:
 		}
 		firstCloseCall := beginClose(rc, &closeReturned)
@@ -128,15 +128,29 @@ func requireConcreteReader(t *testing.T, rc io.ReadCloser) {
 
 type timedCall[T any] struct {
 	started <-chan time.Time
-	result  <-chan T
+	result  <-chan timedResult[T]
 }
+
+type timedResult[T any] struct {
+	value      T
+	finishedAt time.Time
+}
+
+type waitOutcome uint8
+
+const (
+	waitSucceeded waitOutcome = iota
+	waitBoundExceeded
+	waitContextEnded
+)
 
 func beginTimedCall[T any](call func() T) timedCall[T] {
 	started := make(chan time.Time, 1)
-	result := make(chan T, 1)
+	result := make(chan timedResult[T], 1)
 	go func() {
 		started <- time.Now()
-		result <- call()
+		value := call()
+		result <- timedResult[T]{value: value, finishedAt: time.Now()}
 	}()
 	return timedCall[T]{started: started, result: result}
 }
@@ -166,39 +180,103 @@ func lifecycleDeadline(ctx context.Context, started time.Time, bound time.Durati
 	return deadline
 }
 
-func receiveBeforeContext[T any](t *testing.T, ctx context.Context, result <-chan T, operation string) T {
+func receiveBeforeContext(t *testing.T, ctx context.Context, result <-chan time.Time, operation string) time.Time {
 	t.Helper()
+	started, ok := waitStart(ctx, result)
+	if ok {
+		return started
+	}
+	t.Fatalf("%s did not occur within the conformance timeout", operation)
+	return time.Time{}
+}
+
+func waitStart(ctx context.Context, result <-chan time.Time) (time.Time, bool) {
+	classify := func(started time.Time) (time.Time, bool) {
+		if deadline, ok := ctx.Deadline(); ok && started.After(deadline) {
+			return started, false
+		}
+		return started, true
+	}
+	ready := func() (time.Time, bool, bool) {
+		select {
+		case started := <-result:
+			classified, ok := classify(started)
+			return classified, ok, true
+		default:
+			return time.Time{}, false, false
+		}
+	}
+	if started, ok, received := ready(); received {
+		return started, ok
+	}
 	select {
-	case value := <-result:
-		return value
+	case started := <-result:
+		return classify(started)
 	case <-ctx.Done():
-		t.Fatalf("%s did not occur within the conformance timeout", operation)
-		var zero T
-		return zero
+		if started, ok, received := ready(); received {
+			return started, ok
+		}
+		return time.Time{}, false
 	}
 }
 
-func receiveBefore[T any](t *testing.T, ctx context.Context, result <-chan T, deadline time.Time, operation string) T {
+func receiveBefore[T any](t *testing.T, ctx context.Context, result <-chan timedResult[T], deadline time.Time, operation string) T {
 	t.Helper()
+	timed, outcome := waitTimedResult(ctx, result, deadline)
+	switch outcome {
+	case waitSucceeded:
+		return timed.value
+	case waitContextEnded:
+		t.Fatalf("%s did not return within the conformance timeout", operation)
+	case waitBoundExceeded:
+		t.Fatalf("%s did not return within the bounded lifecycle wait", operation)
+	}
+	var zero T
+	return zero
+}
+
+func waitTimedResult[T any](ctx context.Context, result <-chan timedResult[T], deadline time.Time) (timedResult[T], waitOutcome) {
+	classify := func(timed timedResult[T]) (timedResult[T], waitOutcome) {
+		if timed.finishedAt.After(deadline) {
+			return timed, waitBoundExceeded
+		}
+		return timed, waitSucceeded
+	}
+	ready := func() (timedResult[T], waitOutcome, bool) {
+		select {
+		case timed := <-result:
+			classified, outcome := classify(timed)
+			return classified, outcome, true
+		default:
+			var zero timedResult[T]
+			return zero, waitSucceeded, false
+		}
+	}
+	if timed, outcome, ok := ready(); ok {
+		return timed, outcome
+	}
 	remaining := time.Until(deadline)
 	if remaining <= 0 {
-		t.Fatalf("%s did not return within the bounded lifecycle wait", operation)
-		var zero T
-		return zero
+		var zero timedResult[T]
+		return zero, waitBoundExceeded
 	}
 	timer := time.NewTimer(remaining)
 	defer timer.Stop()
 	select {
-	case value := <-result:
-		return value
+	case timed := <-result:
+		return classify(timed)
 	case <-ctx.Done():
-		t.Fatalf("%s did not return within the conformance timeout", operation)
-		var zero T
-		return zero
+		if timed, outcome, ok := ready(); ok {
+			return timed, outcome
+		}
+		var zero timedResult[T]
+		return zero, waitContextEnded
 	case <-timer.C:
-		t.Fatalf("%s did not return within the bounded lifecycle wait", operation)
-		var zero T
-		return zero
+		if timed, outcome, ok := ready(); ok {
+			return timed, outcome
+		}
+		var zero timedResult[T]
+		return zero, waitBoundExceeded
 	}
 }
 
