@@ -3,7 +3,6 @@ package storetest
 import (
 	"bytes"
 	"errors"
-	"sync/atomic"
 	"testing"
 
 	"github.com/looprig/storage"
@@ -108,127 +107,6 @@ func TestBlobs(t *testing.T, newBackend func(t *testing.T) storage.Blobs) {
 		}
 		if nf.Key != key {
 			t.Errorf("BlobNotFoundError.Key = %q, want %q", nf.Key, key)
-		}
-	})
-
-	t.Run("Get reader Close is concurrent idempotent shutdown", func(t *testing.T) {
-		b := newBackend(t)
-		const key = "blobs/reader-close"
-		content := patternedBytes(payloadFloor)
-		if err := b.Put(ctx, key, bytes.NewReader(content)); err != nil {
-			t.Fatalf("Put: %v", err)
-		}
-		rc, err := b.Get(ctx, key)
-		if err != nil {
-			t.Fatalf("Get: %v", err)
-		}
-		if rc == nil {
-			t.Fatal("Get returned a nil reader with nil error")
-		}
-
-		started := make(chan struct{})
-		resume := make(chan struct{})
-		result := make(chan error, 1)
-		var closeReturned atomic.Bool
-		go func() {
-			first := true
-			var one [1]byte
-			for {
-				beganAfterClose := closeReturned.Load()
-				n, readErr := rc.Read(one[:])
-				if first {
-					first = false
-					close(started)
-					if readErr == nil {
-						<-resume
-					}
-				}
-				if beganAfterClose && n > 0 {
-					result <- errors.New("read succeeded after Close returned")
-					return
-				}
-				if readErr != nil {
-					result <- readErr
-					return
-				}
-			}
-		}()
-		select {
-		case <-started:
-		case <-ctx.Done():
-			t.Fatal("initial Read did not return")
-		}
-		select {
-		case readErr := <-result:
-			t.Fatalf("read loop terminated before Close: %v", readErr)
-		default:
-		}
-		closeCall := func() error {
-			closed := make(chan error, 1)
-			go func() { closed <- rc.Close() }()
-			select {
-			case closeErr := <-closed:
-				return closeErr
-			case <-ctx.Done():
-				t.Fatal("Close did not return within the conformance bound")
-				return nil
-			}
-		}
-		firstClosed := make(chan error, 1)
-		go func() { firstClosed <- rc.Close() }()
-		close(resume)
-		var firstClose error
-		select {
-		case firstClose = <-firstClosed:
-		case <-ctx.Done():
-			t.Fatal("first Close did not return within the conformance bound")
-		}
-		closeReturned.Store(true)
-		secondClose := closeCall()
-		if (firstClose == nil) != (secondClose == nil) || (firstClose != nil && !errors.Is(firstClose, secondClose) && !errors.Is(secondClose, firstClose)) {
-			t.Fatalf("Close results are not stable: first=%v second=%v", firstClose, secondClose)
-		}
-		select {
-		case readErr := <-result:
-			if readErr == nil {
-				t.Fatal("read loop ended without a terminal error after Close")
-			}
-		case <-ctx.Done():
-			t.Fatal("read loop did not stop after Close")
-		}
-		for i := 0; i < 3; i++ {
-			var p [8]byte
-			n, readErr := rc.Read(p[:])
-			if n != 0 || readErr == nil {
-				t.Fatalf("Read after Close call %d = %d, %v; want 0 and a terminal error", i, n, readErr)
-			}
-		}
-	})
-
-	t.Run("Get reader may be closed before its first Read", func(t *testing.T) {
-		b := newBackend(t)
-		const key = "blobs/reader-close-unread"
-		if err := b.Put(ctx, key, bytes.NewReader([]byte("unread bytes"))); err != nil {
-			t.Fatalf("Put: %v", err)
-		}
-		rc, err := b.Get(ctx, key)
-		if err != nil {
-			t.Fatalf("Get: %v", err)
-		}
-		if rc == nil {
-			t.Fatal("Get returned a nil reader with nil error")
-		}
-		firstClose := rc.Close()
-		secondClose := rc.Close()
-		if (firstClose == nil) != (secondClose == nil) || (firstClose != nil && !errors.Is(firstClose, secondClose) && !errors.Is(secondClose, firstClose)) {
-			t.Fatalf("Close results are not stable: first=%v second=%v", firstClose, secondClose)
-		}
-		for i := 0; i < 3; i++ {
-			var p [8]byte
-			n, readErr := rc.Read(p[:])
-			if n != 0 || readErr == nil {
-				t.Fatalf("Read after immediate Close call %d = %d, %v; want 0 and a terminal error", i, n, readErr)
-			}
 		}
 	})
 

@@ -39,6 +39,17 @@ func TestBlobsConformance(t *testing.T) {
 	storetest.TestBlobs(t, func(t *testing.T) storage.Blobs { return memstore.New().Blobs })
 }
 
+func TestBlobReaderLifecycleConformance(t *testing.T) {
+	t.Parallel()
+	storetest.TestBlobReaderLifecycle(t, func(t *testing.T) storage.BlobReaderLifecycle {
+		lifecycle, ok := memstore.New().Blobs.(storage.BlobReaderLifecycle)
+		if !ok {
+			t.Fatal("memstore Blobs does not implement storage.BlobReaderLifecycle")
+		}
+		return lifecycle
+	})
+}
+
 func TestOrderedIndexConformance(t *testing.T) {
 	t.Parallel()
 	storetest.TestOrderedIndex(t, func(t *testing.T) storage.OrderedIndex {

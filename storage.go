@@ -15,6 +15,7 @@ import (
 	"context"
 	"io"
 	"strings"
+	"time"
 )
 
 // Ledger addresses many ledgers by name. Append commits payload as the record
@@ -90,18 +91,25 @@ type KV interface {
 // content is a success/no-op; existing different content returns
 // *BlobConflictError and leaves the original object unchanged. Delete is
 // idempotent: deleting an absent key succeeds.
-//
-// Get never returns a nil reader with a nil error. A returned reader permits
-// Close concurrent with Read. Close is idempotent with a stable result; after it
-// returns, every Read returns no bytes and a non-nil provider-specific terminal
-// error. Close also causes provider-controlled waits in an in-flight Read to end
-// within the provider's documented bound. Callers may rely on this lifecycle to
-// bound shutdown before closing an owning provider.
 type Blobs interface {
 	Put(ctx context.Context, key string, r io.Reader) error
 	Get(ctx context.Context, key string) (io.ReadCloser, error)
 	Delete(ctx context.Context, key string) error
 	List(ctx context.Context, prefix string) ([]string, error)
+}
+
+// BlobReaderLifecycle is an optional Blobs capability for providers whose Get
+// readers support bounded shutdown. BlobReaderCloseBound returns a positive,
+// documented upper bound for Close itself and for any active provider-controlled
+// Read to return after Close begins. A successful Get returns a usable, concrete
+// non-nil reader. Its Read and Close methods are safe to call concurrently.
+// Close is idempotent with a stable success/failure classification: repeated
+// calls either both succeed, or their errors are equivalent under errors.Is.
+// After Close returns, every Read returns zero bytes and a non-nil error other
+// than io.EOF; that terminal error is provider-specific.
+type BlobReaderLifecycle interface {
+	Blobs
+	BlobReaderCloseBound() time.Duration
 }
 
 // Composite holds the storage primitives assembled where dependencies are

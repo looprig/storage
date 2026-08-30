@@ -27,12 +27,12 @@ returns a complete five-primitive composite for examples and tests.
 
 This module has **zero third-party dependencies** and will keep it that way.
 
-## Compatibility note
+## Optional Blob reader lifecycle
 
-The planned v0.5.1 release strengthens the compatible `Blobs.Get` reader
-lifecycle without changing the interface signature. A successful Get returns a
-non-nil reader; its Close is safe concurrent with Read, has a stable idempotent
-result, makes later Reads return no bytes with a provider-specific terminal
-error, and ends provider-controlled waits within the provider's documented
-bound. This lets owners drain readers before closing a storage provider during
-bounded shutdown.
+The planned v0.6.0 release leaves the base `Blobs` contract unchanged and adds
+the compatible `BlobReaderLifecycle` capability. Providers opt in by publishing
+a positive reader-close bound and guaranteeing concrete non-nil readers,
+concurrent-safe Read and Close, stable idempotent Close classification,
+non-EOF terminal reads after Close, and bounded provider-controlled waits.
+Consumers that require bounded shutdown can test for this capability without
+excluding existing `Blobs` implementations from other uses.

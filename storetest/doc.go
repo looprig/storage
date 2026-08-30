@@ -17,9 +17,10 @@
 // copy-in/copy-out ownership guarantees. The separate Leaser lifecycle suite
 // uses a provider-supplied, test-only harness to cover deterministic renewal
 // and expiry without expanding the production Leaser interface. For the same
-// reason, the Blobs suite exercises a running Read loop concurrent with Close
-// and post-Close behavior, while a provider that can block inside external I/O
-// must test its documented unblock bound with a backend-specific probe. The
+// reason, TestBlobReaderLifecycle is separate from the base Blobs suite: only
+// providers claiming that optional capability run its concurrent and post-Close
+// checks. A provider that can block inside external I/O must additionally test
+// its documented bound with a backend-specific deterministic probe. The
 // OrderedIndex suite takes malformed and unknown-version cursor
 // tokens from a required OrderedCursorProbe parameter: cursor bytes are
 // opaque, so a literal token here would pin one provider's grammar as the

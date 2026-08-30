@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/looprig/storage"
 )
@@ -33,6 +34,11 @@ func newBlobStore() *blobStore {
 
 // Compile-time proof that *blobStore honors the Blobs contract.
 var _ storage.Blobs = (*blobStore)(nil)
+var _ storage.BlobReaderLifecycle = (*blobStore)(nil)
+
+// BlobReaderCloseBound is a conservative upper bound for the in-memory
+// reader's lock handoff. blobReader performs no provider-controlled I/O.
+func (*blobStore) BlobReaderCloseBound() time.Duration { return time.Second }
 
 // Put reads r to completion and stores the bytes at key. It validates the key
 // first (*InvalidNameError). If key already holds byte-identical content the Put
