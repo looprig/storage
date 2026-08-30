@@ -37,8 +37,11 @@ var _ storage.Blobs = (*blobStore)(nil)
 var _ storage.BlobReaderLifecycle = (*blobStore)(nil)
 
 // BlobReaderCloseBound is a conservative upper bound for the in-memory
-// reader's lock handoff. blobReader performs no provider-controlled I/O.
+// reader's lock handoff. blobReader performs no provider-controlled I/O and
+// copies at most blobReaderReadChunk bytes while holding its lifecycle mutex.
 func (*blobStore) BlobReaderCloseBound() time.Duration { return time.Second }
+
+const blobReaderReadChunk = 64 << 10
 
 // Put reads r to completion and stores the bytes at key. It validates the key
 // first (*InvalidNameError). If key already holds byte-identical content the Put
@@ -92,6 +95,7 @@ func (s *blobStore) Get(ctx context.Context, key string) (io.ReadCloser, error) 
 // blobReader is one Get call's independent, close-aware view of immutable blob
 // bytes. The mutex serializes position changes with closure: once Close returns,
 // no later Read can return bytes, and an already-running Read has completed.
+// Each call copies a fixed-size chunk at most, bounding work ahead of Close.
 type blobReader struct {
 	mu     sync.Mutex
 	data   []byte
@@ -113,7 +117,7 @@ func (r *blobReader) Read(p []byte) (int, error) {
 	if r.offset == len(r.data) {
 		return 0, io.EOF
 	}
-	n := copy(p, r.data[r.offset:])
+	n := copy(p[:min(len(p), blobReaderReadChunk)], r.data[r.offset:])
 	r.offset += n
 	return n, nil
 }

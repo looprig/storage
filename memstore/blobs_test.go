@@ -153,3 +153,41 @@ func TestBlobGetReaderCloseBeforeRead(t *testing.T) {
 		t.Fatalf("Read after immediate Close = %d, %v; want 0, fs.ErrClosed", n, err)
 	}
 }
+
+func TestBlobGetReaderBoundsWorkPerRead(t *testing.T) {
+	t.Parallel()
+
+	const expectedReadChunk = 64 << 10
+	content := make([]byte, 3*expectedReadChunk+17)
+	for i := range content {
+		content[i] = byte(i * 31)
+	}
+	s := newBlobStore()
+	const key = "blobs/bounded-read"
+	if err := s.Put(context.Background(), key, bytes.NewReader(content)); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	rc, err := s.Get(context.Background(), key)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	p := make([]byte, 4*expectedReadChunk)
+	n, err := rc.Read(p)
+	if n != expectedReadChunk || err != nil {
+		t.Fatalf("large-buffer Read = %d, %v; want bounded partial read %d, nil", n, err, expectedReadChunk)
+	}
+	tail, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll remainder: %v", err)
+	}
+	got := append(append([]byte(nil), p[:n]...), tail...)
+	if !bytes.Equal(got, content) {
+		t.Fatal("bounded partial reads did not preserve byte-for-byte content")
+	}
+	if err := rc.Close(); err != nil {
+		t.Fatalf("Close = %v", err)
+	}
+	if n, err := rc.Read(p[:1]); n != 0 || !errors.Is(err, fs.ErrClosed) {
+		t.Fatalf("Read after Close = %d, %v; want 0, fs.ErrClosed", n, err)
+	}
+}
