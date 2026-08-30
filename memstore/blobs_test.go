@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"testing"
 	"testing/iotest"
 
@@ -93,5 +94,62 @@ func TestBlobGetIndependentReader(t *testing.T) {
 	second := getBytes(t, s, key)
 	if !bytes.Equal(second, content) {
 		t.Errorf("second Get() = %q, want %q (each Get is independent of stored bytes)", second, content)
+	}
+}
+
+func TestBlobGetReaderClosePublishesClosedState(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	s := newBlobStore()
+	const key = "blobs/close-state"
+	content := []byte("independent immutable bytes")
+	if err := s.Put(ctx, key, bytes.NewReader(content)); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	rc, err := s.Get(ctx, key)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	var prefix [4]byte
+	if n, err := rc.Read(prefix[:]); n != len(prefix) || err != nil {
+		t.Fatalf("Read prefix = %d, %v", n, err)
+	}
+	if err := rc.Close(); err != nil {
+		t.Fatalf("first Close = %v", err)
+	}
+	if err := rc.Close(); err != nil {
+		t.Fatalf("second Close = %v", err)
+	}
+	var p [1]byte
+	if n, err := rc.Read(p[:]); n != 0 || !errors.Is(err, fs.ErrClosed) {
+		t.Fatalf("Read after Close = %d, %v; want 0, fs.ErrClosed", n, err)
+	}
+	if got := getBytes(t, s, key); !bytes.Equal(got, content) {
+		t.Fatalf("closing one reader changed stored bytes: got %q want %q", got, content)
+	}
+}
+
+func TestBlobGetReaderCloseBeforeRead(t *testing.T) {
+	t.Parallel()
+
+	s := newBlobStore()
+	const key = "blobs/close-before-read"
+	if err := s.Put(context.Background(), key, bytes.NewReader([]byte("unread"))); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	rc, err := s.Get(context.Background(), key)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if err := rc.Close(); err != nil {
+		t.Fatalf("first Close = %v", err)
+	}
+	if err := rc.Close(); err != nil {
+		t.Fatalf("second Close = %v", err)
+	}
+	var p [1]byte
+	if n, err := rc.Read(p[:]); n != 0 || !errors.Is(err, fs.ErrClosed) {
+		t.Fatalf("Read after immediate Close = %d, %v; want 0, fs.ErrClosed", n, err)
 	}
 }

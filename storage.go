@@ -90,6 +90,13 @@ type KV interface {
 // content is a success/no-op; existing different content returns
 // *BlobConflictError and leaves the original object unchanged. Delete is
 // idempotent: deleting an absent key succeeds.
+//
+// Get never returns a nil reader with a nil error. A returned reader permits
+// Close concurrent with Read. Close is idempotent with a stable result; after it
+// returns, every Read returns no bytes and a non-nil provider-specific terminal
+// error. Close also causes provider-controlled waits in an in-flight Read to end
+// within the provider's documented bound. Callers may rely on this lifecycle to
+// bound shutdown before closing an owning provider.
 type Blobs interface {
 	Put(ctx context.Context, key string, r io.Reader) error
 	Get(ctx context.Context, key string) (io.ReadCloser, error)

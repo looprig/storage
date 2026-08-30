@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"io/fs"
 	"sort"
 	"strings"
 	"sync"
@@ -79,7 +80,43 @@ func (s *blobStore) Get(ctx context.Context, key string) (io.ReadCloser, error) 
 	}
 	out := make([]byte, len(data))
 	copy(out, data)
-	return io.NopCloser(bytes.NewReader(out)), nil
+	return &blobReader{data: out}, nil
+}
+
+// blobReader is one Get call's independent, close-aware view of immutable blob
+// bytes. The mutex serializes position changes with closure: once Close returns,
+// no later Read can return bytes, and an already-running Read has completed.
+type blobReader struct {
+	mu     sync.Mutex
+	data   []byte
+	offset int
+	closed bool
+}
+
+var _ io.ReadCloser = (*blobReader)(nil)
+
+func (r *blobReader) Read(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return 0, fs.ErrClosed
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if r.offset == len(r.data) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data[r.offset:])
+	r.offset += n
+	return n, nil
+}
+
+func (r *blobReader) Close() error {
+	r.mu.Lock()
+	r.closed = true
+	r.mu.Unlock()
+	return nil
 }
 
 // Delete removes key; it validates the key first (*InvalidNameError) and is
