@@ -6,9 +6,12 @@
 // AppendDefinite ambiguity resolver.
 //
 // Names and keys are canonical by construction (see ValidateName), so no two
-// valid names alias one backend location. Every backend must accept ledger
-// payloads and KV values up to 1 MiB; larger payloads are the engine's
-// responsibility to offload to Blobs.
+// valid names alias one backend location. In particular a name and a name that
+// extends it with "/…" are distinct names: the '/' separator is part of the
+// name's spelling, not a directory a backend may substitute for the shorter
+// name's own location (see KV and Blobs, whose conformance suites exercise
+// this). Every backend must accept ledger payloads and KV values up to 1 MiB;
+// larger payloads are the engine's responsibility to offload to Blobs.
 package storage
 
 import (
@@ -79,6 +82,17 @@ type Lease interface {
 
 // KV holds small CAS'd metadata (the session catalog). Revisions are per-key,
 // strictly increasing; Put with expectedRev 0 requires the key to be absent.
+//
+// Keys are hierarchical in name only. A valid key and a valid key that extends
+// it with "/…" (for example "sessions/a" and "sessions/a/b") are distinct keys:
+// both must be storable at once, whichever is created first, each with its own
+// value and revision, and deleting one must leave the other readable and
+// unchanged. Keys(prefix) is a plain string-prefix filter, so it returns every
+// such key whose string begins with prefix — a key together with its
+// descendants, and a descendant alone when prefix extends past the key. This
+// follows from the package rule that no two valid names alias one backend
+// location; a backend that maps names onto a filesystem-shaped hierarchy must
+// keep a key's own location disjoint from the namespace beneath it.
 type KV interface {
 	Get(ctx context.Context, key string) (val []byte, rev uint64, err error)
 	Put(ctx context.Context, key string, expectedRev uint64, val []byte) (rev uint64, err error)
@@ -91,6 +105,15 @@ type KV interface {
 // content is a success/no-op; existing different content returns
 // *BlobConflictError and leaves the original object unchanged. Delete is
 // idempotent: deleting an absent key succeeds.
+//
+// Blob keys are hierarchical in name only, exactly as KV keys are. A valid key
+// and a valid key that extends it with "/…" (for example "blobs/a" and
+// "blobs/a/b") are distinct blobs: both must be storable at once, whichever is
+// created first, each with its own content, and deleting one must leave the
+// other readable and unchanged. List(prefix) is a plain string-prefix filter
+// and returns every such key whose string begins with prefix. No two valid
+// names alias one backend location; a filesystem-shaped backend must keep a
+// key's own location disjoint from the namespace beneath it.
 type Blobs interface {
 	Put(ctx context.Context, key string, r io.Reader) error
 	Get(ctx context.Context, key string) (io.ReadCloser, error)

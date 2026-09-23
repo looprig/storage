@@ -195,6 +195,8 @@ func TestKV(t *testing.T, newBackend func(t *testing.T) storage.KV) {
 		}
 	})
 
+	runKVNested(t, ctx, newBackend)
+
 	t.Run("Delete idempotent", func(t *testing.T) {
 		cases := []struct {
 			name    string

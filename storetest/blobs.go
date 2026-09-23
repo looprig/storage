@@ -161,6 +161,8 @@ func TestBlobs(t *testing.T, newBackend func(t *testing.T) storage.Blobs) {
 		}
 	})
 
+	runBlobsNested(t, ctx, newBackend)
+
 	t.Run("Delete idempotent", func(t *testing.T) {
 		cases := []struct {
 			name    string
