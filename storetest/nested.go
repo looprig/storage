@@ -85,15 +85,16 @@ func without(keys []string, drop string) []string {
 }
 
 // runKVNested registers the KV key-extension groups.
-func runKVNested(t *testing.T, ctx context.Context, newBackend func(t *testing.T) storage.KV) {
-	runKVNestedGroup(t, ctx, newBackend, nestedCaseName, nestedCases())
-	runKVNestedGroup(t, ctx, newBackend, dottedCaseName, dottedNestedCases())
+func runKVNested(t *testing.T, newBackend func(t *testing.T) storage.KV) {
+	runKVNestedGroup(t, newBackend, nestedCaseName, nestedCases())
+	runKVNestedGroup(t, newBackend, dottedCaseName, dottedNestedCases())
 }
 
-func runKVNestedGroup(t *testing.T, ctx context.Context, newBackend func(t *testing.T) storage.KV, group string, cases []nestedCase) {
+func runKVNestedGroup(t *testing.T, newBackend func(t *testing.T) storage.KV, group string, cases []nestedCase) {
 	t.Run(group, func(t *testing.T) {
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
+				ctx := rowContext(t)
 				kv := newBackend(t)
 				revs := make(map[string]uint64, len(tc.keys))
 				for _, k := range tc.keys {
@@ -180,15 +181,16 @@ func assertKVListings(t *testing.T, ctx context.Context, kv storage.KV, listings
 }
 
 // runBlobsNested registers the Blobs key-extension groups.
-func runBlobsNested(t *testing.T, ctx context.Context, newBackend func(t *testing.T) storage.Blobs) {
-	runBlobsNestedGroup(t, ctx, newBackend, nestedCaseName, nestedCases())
-	runBlobsNestedGroup(t, ctx, newBackend, dottedCaseName, dottedNestedCases())
+func runBlobsNested(t *testing.T, newBackend func(t *testing.T) storage.Blobs) {
+	runBlobsNestedGroup(t, newBackend, nestedCaseName, nestedCases())
+	runBlobsNestedGroup(t, newBackend, dottedCaseName, dottedNestedCases())
 }
 
-func runBlobsNestedGroup(t *testing.T, ctx context.Context, newBackend func(t *testing.T) storage.Blobs, group string, cases []nestedCase) {
+func runBlobsNestedGroup(t *testing.T, newBackend func(t *testing.T) storage.Blobs, group string, cases []nestedCase) {
 	t.Run(group, func(t *testing.T) {
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
+				ctx := rowContext(t)
 				b := newBackend(t)
 				gens := make(map[string]string, len(tc.keys))
 				for _, k := range tc.keys {
@@ -218,8 +220,9 @@ func runBlobsNestedGroup(t *testing.T, ctx context.Context, newBackend func(t *t
 					} else if bc.Key != k {
 						t.Errorf("different-content re-Put(%q) BlobConflictError.Key = %q, want %q", k, bc.Key, k)
 					}
-					assertBlobValues(t, ctx, b, tc.keys, gens)
+					assertBlobValues(t, ctx, b, []string{k}, gens)
 				}
+				assertBlobValues(t, ctx, b, tc.keys, gens)
 				assertBlobListings(t, ctx, b, tc.listings, "")
 
 				if err := b.Delete(ctx, tc.deleteKey); err != nil {

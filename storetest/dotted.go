@@ -94,10 +94,11 @@ func dottedNestedCases() []nestedCase {
 // runLedgerDotted registers the Ledger dotted-extension group: each name is
 // its own ledger with its own tip and records, and deleting one leaves the
 // others intact.
-func runLedgerDotted(t *testing.T, ctx context.Context, newBackend func(t *testing.T) storage.Ledger) {
+func runLedgerDotted(t *testing.T, newBackend func(t *testing.T) storage.Ledger) {
 	t.Run(dottedCaseName, func(t *testing.T) {
 		for _, tc := range dottedCases() {
 			t.Run(tc.name, func(t *testing.T) {
+				ctx := rowContext(t)
 				l := newBackend(t)
 				for _, n := range tc.names {
 					if err := l.Append(ctx, n, 0, nestedValue(n, "r1")); err != nil {
@@ -163,10 +164,11 @@ func assertLedgerRecords(t *testing.T, ctx context.Context, l storage.Ledger, na
 // runLeaserDotted registers the Leaser dotted-extension group: each name is
 // its own lease slot, held concurrently, refused to a second acquirer by its
 // own holder's epoch, and released without disturbing the others.
-func runLeaserDotted(t *testing.T, ctx context.Context, newBackend func(t *testing.T) storage.Leaser) {
+func runLeaserDotted(t *testing.T, newBackend func(t *testing.T) storage.Leaser) {
 	t.Run(dottedCaseName, func(t *testing.T) {
 		for _, tc := range dottedCases() {
 			t.Run(tc.name, func(t *testing.T) {
+				ctx := rowContext(t)
 				le := newBackend(t)
 				leases := make(map[string]storage.Lease, len(tc.names))
 				t.Cleanup(func() {

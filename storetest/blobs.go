@@ -161,8 +161,6 @@ func TestBlobs(t *testing.T, newBackend func(t *testing.T) storage.Blobs) {
 		}
 	})
 
-	runBlobsNested(t, ctx, newBackend)
-
 	t.Run("Delete idempotent", func(t *testing.T) {
 		cases := []struct {
 			name    string
@@ -241,4 +239,8 @@ func TestBlobs(t *testing.T, newBackend func(t *testing.T) storage.Blobs) {
 			t.Errorf("1 MiB blob did not round-trip byte-equal")
 		}
 	})
+
+	// Last, and each row under its own bounded context: these groups make many
+	// interactions, and the suite-wide context is one wall-clock budget.
+	runBlobsNested(t, newBackend)
 }

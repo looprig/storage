@@ -347,8 +347,6 @@ func TestLedger(t *testing.T, newBackend func(t *testing.T) storage.Ledger) {
 		}
 	})
 
-	runLedgerDotted(t, ctx, newBackend)
-
 	t.Run("concurrent appenders linearize gap-free", func(t *testing.T) {
 		l := newBackend(t)
 		const name = "sessions/linearize"
@@ -413,4 +411,8 @@ func TestLedger(t *testing.T, newBackend func(t *testing.T) storage.Ledger) {
 			}
 		}
 	})
+
+	// Last, and each row under its own bounded context: these groups make many
+	// interactions, and the suite-wide context is one wall-clock budget.
+	runLedgerDotted(t, newBackend)
 }

@@ -132,8 +132,6 @@ func TestLeaser(t *testing.T, newBackend func(t *testing.T) storage.Leaser) {
 		}
 	})
 
-	runLeaserDotted(t, ctx, newBackend)
-
 	t.Run("invalid name", func(t *testing.T) {
 		for _, bad := range invalidNames {
 			t.Run(bad.label, func(t *testing.T) {
@@ -149,6 +147,10 @@ func TestLeaser(t *testing.T, newBackend func(t *testing.T) storage.Leaser) {
 			})
 		}
 	})
+
+	// Last, and each row under its own bounded context: these groups make many
+	// interactions, and the suite-wide context is one wall-clock budget.
+	runLeaserDotted(t, newBackend)
 }
 
 // LeaserLifecycleHarness provides test-only, deterministic controls for a

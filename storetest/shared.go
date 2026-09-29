@@ -17,7 +17,8 @@ const payloadFloor = 1 << 20
 
 // conformanceTimeout is the standard whole-run provider-operation stall guard,
 // not a per-interaction budget: one context bounds every context-aware provider
-// interaction the suite function that created it makes, so a case doing a
+// interaction the suite function that created it makes (the name-coexistence
+// groups are the exception: each of their rows gets its own; see rowContext), so a case doing a
 // hundred creates gets this much time in total. Most suites also use that
 // context deadline as their final observation deadline. BlobReaderLifecycle is
 // the finite exception: its setup calls still receive this bounded context, but
@@ -40,6 +41,17 @@ func conformanceContext(t *testing.T) context.Context {
 	ctx, cancel := context.WithTimeout(context.Background(), conformanceTimeout)
 	t.Cleanup(cancel)
 	return ctx
+}
+
+// rowContext returns a fresh conformanceContext for one row of a table-driven
+// name-coexistence group (the '/'-extension and dotted-extension groups). Those
+// groups run tens of rows of many interactions each, which against a backend
+// that spawns a process per call (rclonestore) would exhaust a whole-suite
+// budget shared with every other case and fail unrelated later cases on the
+// deadline alone. Each row keeps the same stall guard, scoped to itself.
+func rowContext(t *testing.T) context.Context {
+	t.Helper()
+	return conformanceContext(t)
 }
 
 // invalidName pairs a name that violates the storage grammar with a human label

@@ -195,8 +195,6 @@ func TestKV(t *testing.T, newBackend func(t *testing.T) storage.KV) {
 		}
 	})
 
-	runKVNested(t, ctx, newBackend)
-
 	t.Run("Delete idempotent", func(t *testing.T) {
 		cases := []struct {
 			name    string
@@ -281,4 +279,8 @@ func TestKV(t *testing.T, newBackend func(t *testing.T) storage.KV) {
 			t.Errorf("1 MiB value did not round-trip byte-equal")
 		}
 	})
+
+	// Last, and each row under its own bounded context: these groups make many
+	// interactions, and the suite-wide context is one wall-clock budget.
+	runKVNested(t, newBackend)
 }
