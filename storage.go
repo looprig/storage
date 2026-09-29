@@ -10,7 +10,11 @@
 // extends it with "/…" are distinct names: the '/' separator is part of the
 // name's spelling, not a directory a backend may substitute for the shorter
 // name's own location (see KV and Blobs, whose conformance suites exercise
-// this). Every backend must accept ledger payloads and KV values up to 1 MiB;
+// this). Likewise a name, the name with a dotted extension, and that extension
+// extended with "/…" ("a", "a.log", "a.log/b") are three distinct names for
+// every primitive — Ledger names, Leaser names, KV keys, Blobs keys and
+// OrderedIndex namespaces — so a backend that encodes a name as a file with a
+// suffix must choose one no valid name can spell. Every backend must accept ledger payloads and KV values up to 1 MiB;
 // larger payloads are the engine's responsibility to offload to Blobs.
 package storage
 

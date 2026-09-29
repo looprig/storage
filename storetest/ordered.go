@@ -143,6 +143,9 @@ func TestOrderedIndex(t *testing.T, newBackend OrderedIndexFactory, probe Ordere
 	t.Run("TestOrderedIndexDeletePreventsReuse", func(t *testing.T) {
 		testOrderedIndexDeletePreventsReuse(t, newBackend)
 	})
+	t.Run("TestOrderedIndexDottedNamespacesCoexist", func(t *testing.T) {
+		testOrderedIndexDottedNamespacesCoexist(t, newBackend)
+	})
 	if len(counters) == 1 && counters[0] != nil {
 		t.Run("TestOrderedIndexProviderCounters", func(t *testing.T) {
 			counters[0].Assert(t, orderedIndexContext(t), freshOrderedIndex(t, newBackend))

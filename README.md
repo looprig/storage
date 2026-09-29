@@ -72,6 +72,14 @@ plain string-prefix matching. `storetest.TestKV` and `storetest.TestBlobs` exerc
 this, so a backend must pass those cases before it can claim conformance to this
 contract.
 
+Likewise a name, its dotted extension, and that extension's `/…` extension (for
+example `sessions/a`, `sessions/a.log` and `sessions/a.log/b`) are three distinct names
+for **every** primitive: `Ledger` and `Leaser` names, `KV` and `Blobs` keys, and
+`OrderedIndex` namespaces. A backend that encodes a name as a file with a suffix must
+pick a suffix no valid name can spell. Every conformance suite exercises this over a
+spread of extensions (`.log`, `.lock`, `.olog`, `.kv`, `.blob`, `.json`, `.dat`, `.tmp`,
+`.x`, `.a.b`) in both creation orders.
+
 Every backend must accept ledger payloads and KV values up to 1 MiB; larger payloads
 are the engine's responsibility to offload to `Blobs`.
 

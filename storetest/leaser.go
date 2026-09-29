@@ -132,6 +132,8 @@ func TestLeaser(t *testing.T, newBackend func(t *testing.T) storage.Leaser) {
 		}
 	})
 
+	runLeaserDotted(t, ctx, newBackend)
+
 	t.Run("invalid name", func(t *testing.T) {
 		for _, bad := range invalidNames {
 			t.Run(bad.label, func(t *testing.T) {

@@ -347,6 +347,8 @@ func TestLedger(t *testing.T, newBackend func(t *testing.T) storage.Ledger) {
 		}
 	})
 
+	runLedgerDotted(t, ctx, newBackend)
+
 	t.Run("concurrent appenders linearize gap-free", func(t *testing.T) {
 		l := newBackend(t)
 		const name = "sessions/linearize"

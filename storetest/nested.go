@@ -50,6 +50,8 @@ func nestedCases() []nestedCase {
 		{prefix: nestedChild, want: []string{nestedChild}},
 	}
 	deep := []nestedListing{
+		{prefix: "", want: []string{nestedParent, nestedGrandchild, nestedSibling}},
+		{prefix: "sessions/", want: []string{nestedParent, nestedGrandchild, nestedSibling}},
 		{prefix: nestedParent, want: []string{nestedParent, nestedGrandchild, nestedSibling}},
 		{prefix: nestedParent + "/", want: []string{nestedGrandchild}},
 		{prefix: nestedChild, want: []string{nestedGrandchild}},
@@ -82,10 +84,15 @@ func without(keys []string, drop string) []string {
 	return out
 }
 
-// runKVNested registers the KV key-extension group.
+// runKVNested registers the KV key-extension groups.
 func runKVNested(t *testing.T, ctx context.Context, newBackend func(t *testing.T) storage.KV) {
-	t.Run(nestedCaseName, func(t *testing.T) {
-		for _, tc := range nestedCases() {
+	runKVNestedGroup(t, ctx, newBackend, nestedCaseName, nestedCases())
+	runKVNestedGroup(t, ctx, newBackend, dottedCaseName, dottedNestedCases())
+}
+
+func runKVNestedGroup(t *testing.T, ctx context.Context, newBackend func(t *testing.T) storage.KV, group string, cases []nestedCase) {
+	t.Run(group, func(t *testing.T) {
+		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
 				kv := newBackend(t)
 				revs := make(map[string]uint64, len(tc.keys))
@@ -172,18 +179,25 @@ func assertKVListings(t *testing.T, ctx context.Context, kv storage.KV, listings
 	}
 }
 
-// runBlobsNested registers the Blobs key-extension group.
+// runBlobsNested registers the Blobs key-extension groups.
 func runBlobsNested(t *testing.T, ctx context.Context, newBackend func(t *testing.T) storage.Blobs) {
-	t.Run(nestedCaseName, func(t *testing.T) {
-		for _, tc := range nestedCases() {
+	runBlobsNestedGroup(t, ctx, newBackend, nestedCaseName, nestedCases())
+	runBlobsNestedGroup(t, ctx, newBackend, dottedCaseName, dottedNestedCases())
+}
+
+func runBlobsNestedGroup(t *testing.T, ctx context.Context, newBackend func(t *testing.T) storage.Blobs, group string, cases []nestedCase) {
+	t.Run(group, func(t *testing.T) {
+		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
 				b := newBackend(t)
+				gens := make(map[string]string, len(tc.keys))
 				for _, k := range tc.keys {
 					if err := b.Put(ctx, k, bytes.NewReader(nestedValue(k, "v1"))); err != nil {
 						t.Fatalf("Put(%q) with %v already stored = %v, want nil", k, without(tc.keys, k), err)
 					}
+					gens[k] = "v1"
 				}
-				assertBlobValues(t, ctx, b, tc.keys)
+				assertBlobValues(t, ctx, b, tc.keys, gens)
 				assertBlobListings(t, ctx, b, tc.listings, "")
 
 				// Byte-identical re-Put of every key stays a no-op success.
@@ -193,26 +207,46 @@ func runBlobsNested(t *testing.T, ctx context.Context, newBackend func(t *testin
 					}
 				}
 
+				// A different-content re-Put of every key is a genuine conflict
+				// on that key — not a directory or sibling mistaken for one —
+				// and leaves every key, the conflicting one included, intact.
+				for _, k := range tc.keys {
+					err := b.Put(ctx, k, bytes.NewReader(nestedValue(k, "v2")))
+					var bc *storage.BlobConflictError
+					if !errors.As(err, &bc) {
+						t.Errorf("different-content re-Put(%q) = %v, want *BlobConflictError", k, err)
+					} else if bc.Key != k {
+						t.Errorf("different-content re-Put(%q) BlobConflictError.Key = %q, want %q", k, bc.Key, k)
+					}
+					assertBlobValues(t, ctx, b, tc.keys, gens)
+				}
+				assertBlobListings(t, ctx, b, tc.listings, "")
+
 				if err := b.Delete(ctx, tc.deleteKey); err != nil {
 					t.Fatalf("Delete(%q) = %v, want nil", tc.deleteKey, err)
 				}
 				if _, err := b.Get(ctx, tc.deleteKey); !errors.As(err, new(*storage.BlobNotFoundError)) {
 					t.Errorf("Get(%q) after its Delete = %v, want *BlobNotFoundError", tc.deleteKey, err)
 				}
-				assertBlobValues(t, ctx, b, without(tc.keys, tc.deleteKey))
+				assertBlobValues(t, ctx, b, without(tc.keys, tc.deleteKey), gens)
 				assertBlobListings(t, ctx, b, tc.listings, tc.deleteKey)
 
-				if err := b.Put(ctx, tc.deleteKey, bytes.NewReader(nestedValue(tc.deleteKey, "v1"))); err != nil {
-					t.Fatalf("re-Put(%q) after Delete = %v, want nil (key free)", tc.deleteKey, err)
+				// Re-create with DISTINCT content, so a backend that resurrects
+				// the deleted object (a soft delete, a stale cache) is caught.
+				if err := b.Put(ctx, tc.deleteKey, bytes.NewReader(nestedValue(tc.deleteKey, "v3"))); err != nil {
+					t.Fatalf("re-Put(%q) with new content after Delete = %v, want nil (key free)", tc.deleteKey, err)
 				}
-				assertBlobValues(t, ctx, b, tc.keys)
+				gens[tc.deleteKey] = "v3"
+				assertBlobValues(t, ctx, b, tc.keys, gens)
 				assertBlobListings(t, ctx, b, tc.listings, "")
 			})
 		}
 	})
 }
 
-func assertBlobValues(t *testing.T, ctx context.Context, b storage.Blobs, keys []string) {
+// assertBlobValues checks each key reads back the content of the generation
+// gens records for it.
+func assertBlobValues(t *testing.T, ctx context.Context, b storage.Blobs, keys []string, gens map[string]string) {
 	t.Helper()
 	for _, k := range keys {
 		rc, err := b.Get(ctx, k)
@@ -220,7 +254,7 @@ func assertBlobValues(t *testing.T, ctx context.Context, b storage.Blobs, keys [
 			t.Errorf("Get(%q) = %v, want nil", k, err)
 			continue
 		}
-		if got, want := readBlob(t, rc), nestedValue(k, "v1"); !bytes.Equal(got, want) {
+		if got, want := readBlob(t, rc), nestedValue(k, gens[k]); !bytes.Equal(got, want) {
 			t.Errorf("Get(%q) = %q, want %q", k, got, want)
 		}
 	}
