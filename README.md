@@ -23,8 +23,8 @@ This module has **zero third-party dependencies** and will keep it that way.
 
 Released and in use by every Looprig storage backend and by `sessionstore`,
 `harness`, `flow/store` and the modules above them. The current contract includes
-the optional `BlobReaderLifecycle` capability and the nested-name rule described
-below.
+the optional `BlobReaderLifecycle` capability (with an opt-in adapter for local
+providers) and the nested-name rule described below.
 
 ## Install
 
@@ -36,7 +36,7 @@ go get github.com/looprig/storage@latest
 
 | Package | Purpose |
 |---|---|
-| `github.com/looprig/storage` | The five primitive interfaces, `Composite`, typed errors, validators, `AppendDefinite`. |
+| `github.com/looprig/storage` | The five primitive interfaces, `Composite`, typed errors, validators, `AppendDefinite`, and the opt-in `WithBoundedBlobReaders` adapter. |
 | `github.com/looprig/storage/memstore` | In-memory reference backend; `memstore.New()` returns a complete five-primitive `*storage.Composite`. It is the conformance oracle other backends are checked against. |
 | `github.com/looprig/storage/storetest` | Backend conformance suites: `TestLedger`, `TestLeaser`, `TestLeaserLifecycle`, `TestKV`, `TestBlobs`, `TestBlobReaderLifecycle`, `TestOrderedIndex`, `TestOrderedIndexRevisionConflicts`. |
 | `github.com/looprig/storage/examples/...` | Runnable examples for each primitive, composition and conformance. |
@@ -93,6 +93,56 @@ classification, non-EOF terminal reads after `Close`, and bounded provider-contr
 waits. Consumers that require bounded shutdown (for example `sessionstore`) test for
 this capability; `storetest.TestBlobReaderLifecycle` verifies it. `memstore`
 implements it.
+
+### Opting a local provider in: `WithBoundedBlobReaders`
+
+A filesystem-shaped provider such as `fsstore` deliberately does **not** implement
+`BlobReaderLifecycle`: portable file I/O has no read deadlines, so it cannot promise
+that a blocked `Read` returns. `sessionstore.Open` therefore refuses it
+(`invalid backend: missing BlobReaderLifecycle`). A **local, single-host** deployment
+that accepts the trade-off below can opt in explicitly:
+
+```go
+fs, err := fsstore.Open(fsstore.Options{Root: dir})
+if err != nil {
+	return err // handle fsstore.ErrLegacyLayout with "move or delete <Root>", never a retry
+}
+defer fs.Close()
+
+backend, err := fs.Backend().WithBoundedBlobReaders() // a copy; fs.Backend() is not mutated
+if err != nil {
+	return err
+}
+sessions, err := sessionstore.Open(ctx, backend)
+```
+
+`storage.WithBoundedBlobReaders(b Blobs)` adapts a single provider;
+`(*Composite).WithBoundedBlobReaders()` returns a copy of a composite with only its
+`Blobs` adapted. The contract:
+
+- **What is bounded.** `Get` hands back the read half of an in-memory pipe and copies
+  the provider's reader into it on a goroutine the adapter owns. The returned reader's
+  `Close` closes the pipe: it returns within `BoundedBlobReaderCloseBound` (1s, a
+  generous declared ceiling for a pipe close) and releases any `Read` blocked on the
+  stream, which returns `*storage.BlobReaderClosedError` (wrapping `io.ErrClosedPipe`,
+  never `io.EOF`). `Close` never waits on the provider.
+- **What it costs.** The provider's `Read` is **abandoned, not cancelled**. If it is
+  blocked when the caller closes, the pump goroutine and the provider reader — for a
+  filesystem store, an open file descriptor — stay alive until that `Read` returns on
+  its own; only then is the provider reader closed. On a local disk that is
+  microseconds; on a wedged network or FUSE mount it may be never. Callers must still
+  `Close` every reader they obtain.
+- **Integrity.** A complete stream ends in a genuine `io.EOF` after the provider reader
+  closed cleanly. A provider `Read` error mid-stream, or a provider `Close` error after
+  the last byte, reaches the caller as that error — never as a clean EOF. `Get` errors
+  (including a typed `*BlobNotFoundError`) are returned by `Get` itself, eagerly; a
+  provider returning a nil reader is refused with `*NilBlobReaderError`.
+- **Scope.** It is for local, single-host use. A distributed or network backend should
+  implement `BlobReaderLifecycle` natively by genuinely cancelling its I/O (as `s3store`
+  does). A provider that already implements it is returned unchanged, with its own
+  bound. `Put`, `Delete` and `List` delegate unchanged, and `PathReporter` is forwarded
+  exactly when the wrapped provider implements it. A nil provider is refused
+  (`*NilBlobsError`, or `*IncompleteCompositeError` naming `Blobs` for a composite).
 
 ## Writing a backend
 

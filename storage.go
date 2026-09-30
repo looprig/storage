@@ -134,6 +134,10 @@ type Blobs interface {
 // calls either both succeed, or their errors are equivalent under errors.Is.
 // After Close returns, every Read returns zero bytes and a non-nil error other
 // than io.EOF; that terminal error is provider-specific.
+//
+// A local, single-host provider that cannot bound its own reads (a filesystem
+// store) may be adapted explicitly with WithBoundedBlobReaders, which bounds
+// Close by abandoning, not cancelling, a blocked provider Read.
 type BlobReaderLifecycle interface {
 	Blobs
 	BlobReaderCloseBound() time.Duration
