@@ -163,7 +163,7 @@ Tier 0 in the Looprig dependency graph: no Looprig dependencies.
 
 ## Development
 
-Go 1.26.8 baseline. Verify standalone, without a workspace:
+Go 1.26.9 baseline. Verify standalone, without a workspace:
 
 ```sh
 GOWORK=off go test ./...
